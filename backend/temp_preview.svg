@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg viewBox="-14.677840000000002 -167.01184 212.82868000000002 376.44668" xmlns="http://www.w3.org/2000/svg" version="1.1" width="100%" height="100%">
+<style>
+  svg { background: transparent !important; }
+  path { stroke: #00A3FF !important; stroke-width: 0.8px !important; fill: none !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
+  circle { stroke: #8A90B4 !important; stroke-width: 0.8px !important; fill: none !important; }
+</style>
+<g   fill="none"
+   stroke="rgb(0, 0, 0)"
+   stroke-linecap="butt"
+   stroke-linejoin="miter"
+   stroke-width="1.0"
+   transform="scale(1, -1)"
+  >
+<path id= "1" d=" M 159.473 -123.087 L 159.473 -136.151 " />
+<path id= "2" d=" M 183.473 -123.087 L 183.473 -136.151 " />
+<path id= "3" d=" M 163.473 54.0929 L 163.473 -123.087 " />
+<path id= "4" d=" M 179.473 54.0929 L 179.473 -123.087 " />
+<path id= "5" d=" M 164.473 78.5878 L 164.473 54.0929 " />
+<path id= "6" d=" M 178.473 78.5878 L 178.473 54.0929 " />
+</g>
+<g   fill="none"
+   stroke="rgb(0, 0, 0)"
+   stroke-linecap="butt"
+   stroke-linejoin="miter"
+   stroke-width="1.0"
+   transform="scale(1, -1)"
+  >
+<path d="M162.988 -127.986 A12 6.9282 0 0 1 183.473 -123.087" />
+<path d="M183.473 -123.087 A12 6.9282 0 0 1 179.473 -117.923" />
+<path d="M163.473 -117.923 A12 6.9282 0 0 1 159.473 -123.087" />
+<path d="M159.473 -123.087 A12 6.9282 0 0 1 162.988 -127.986" />
+<path d="M162.988 -141.05 A12 6.9282 0 0 1 183.473 -136.151" />
+<path d="M159.473 -136.151 A12 6.9282 0 0 1 162.988 -141.05" />
+<path d="M165.817 -126.353 A8 4.6188 0 0 1 179.473 -123.087" />
+<path d="M163.473 -123.087 A8 4.6188 0 0 1 165.817 -126.353" />
+<path d="M178.473 54.0929 A7 4.04145 180 0 0 164.473 54.0929" />
+<path d="M178.473 56.329 A8 4.6188 180 0 0 179.473 54.0929" />
+<path d="M179.473 54.0929 A8 4.6188 180 0 0 165.817 50.8269" />
+<path d="M165.817 50.8269 A8 4.6188 180 0 0 163.473 54.0929" />
+<path d="M163.473 54.0929 A8 4.6188 180 0 0 164.473 56.329" />
+<path d="M176.423 81.4455 A7 4.04145 180 0 0 178.473 78.5878" />
+<path d="M178.473 78.5878 A7 4.04145 180 0 0 164.473 78.5878" />
+<path d="M164.473 78.5878 A7 4.04145 180 0 0 176.423 81.4455" />
+</g>
+
+</svg>

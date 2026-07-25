@@ -1,0 +1,22 @@
+<svg viewBox="-225.5 -139.518 451.0 236.323" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    svg { background: #FFFFFF; }
+    .cut { stroke: #0073CC; stroke-width: 1.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .fold { stroke: #E84D00; stroke-width: 1.2; stroke-dasharray: 4,4; fill: none; }
+  </style>
+  <g transform="scale(1, -1) translate(0, 63.212999999999994)">
+    <polyline points="-205.0,-119.018 -205.0,-67.754 -205.0,-56.263 -205.0,56.263 -205.0,60.042 -205.0,76.305 205.0,76.305 205.0,60.042 205.0,56.263 205.0,-56.263 205.0,-67.754 205.0,-119.018 -205.0,-119.018" class="cut" />
+    <line x1="-205.0" y1="57.784402083235484" x2="-199.0" y2="57.784402083235484" class="fold" />
+    <rect x="-205.75" y="57.034402083235484" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+    <rect x="-199.75" y="57.034402083235484" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+    <line x1="199.0" y1="57.784402083235484" x2="205.0" y2="57.784402083235484" class="fold" />
+    <rect x="198.25" y="57.034402083235484" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+    <rect x="204.25" y="57.034402083235484" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+    <line x1="-205.0" y1="-60.14059657342783" x2="-199.0" y2="-60.14059657342783" class="fold" />
+    <rect x="-205.75" y="-60.89059657342783" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+    <rect x="-199.75" y="-60.89059657342783" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+    <line x1="199.0" y1="-60.14059657342783" x2="205.0" y2="-60.14059657342783" class="fold" />
+    <rect x="198.25" y="-60.89059657342783" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+    <rect x="204.25" y="-60.89059657342783" width="1.5" height="1.5" fill="#FFFFFF" stroke="#FFB300" stroke-width="0.5" />
+  </g>
+</svg>
