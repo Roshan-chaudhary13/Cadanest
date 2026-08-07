@@ -18,6 +18,16 @@ try:
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)
+except Exception:
+    pass
+
+try:
+    from cache_manager import CACHE_DIR
+except Exception:
+    # Fallback if cache_manager is unavailable at import time; keep in sync manually.
+    CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cadanest_cache")
+
+try:
     from occ_unfold_bridge import MATERIAL_CATALOG
 except Exception:
     # Fallback if occ_unfold_bridge is unavailable at import time; keep names in sync manually.
@@ -372,7 +382,7 @@ def convert_assembly_batch(asm_path, output_dir):
         except Exception:
             pass
 
-        global_cache_dir = os.path.join(os.path.expanduser("~"), ".cadanest_cache", "converted_step")
+        global_cache_dir = os.path.join(CACHE_DIR, "converted_step")
         os.makedirs(global_cache_dir, exist_ok=True)
 
         results = []

@@ -23,6 +23,9 @@ export const STANDARD_MATERIALS: MaterialInfo[] = [
   { name: 'High Tensile Steel', code: 'HT Steel', density: 7850, kFactor: 0.44 },
 ];
 
+// Default density (kg/m³) used whenever a part/material's density is unknown — Mild Steel.
+export const DEFAULT_DENSITY_KG_M3 = STANDARD_MATERIALS[0].density;
+
 export function getMaterialByDensity(density: number): MaterialInfo {
   let closest = STANDARD_MATERIALS[0];
   let minDiff = Math.abs(density - closest.density);

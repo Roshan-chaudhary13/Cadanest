@@ -1,5 +1,5 @@
 import React from 'react';
-import { useCadanestStore, JobGroup, STANDARD_MATERIALS, DEFAULT_THICKNESS_MM } from '../store/useCadanestStore';
+import { useCadanestStore, JobGroup, STANDARD_MATERIALS, DEFAULT_THICKNESS_MM, DEFAULT_DENSITY_KG_M3 } from '../store/useCadanestStore';
 import { PartItem } from '../App';
 import { Layers, FileCode, ChevronRight } from 'lucide-react';
 
@@ -22,7 +22,7 @@ export const JobGroupTab: React.FC<JobGroupTabProps> = ({ parts, onSelectGroupFo
         (m) => m.name.toLowerCase() === matName.toLowerCase() || m.code.toLowerCase() === matName.toLowerCase()
       );
       if (!matInfo) {
-        matInfo = { name: matName, code: matName.substring(0, 6).toUpperCase(), density: part.density || 7850, kFactor: part.kfactor || 0.44 };
+        matInfo = { name: matName, code: matName.substring(0, 6).toUpperCase(), density: part.density || DEFAULT_DENSITY_KG_M3, kFactor: part.kfactor || 0.44 };
       }
 
       const key = `${matInfo.code}_${thick.toFixed(1)}mm`;

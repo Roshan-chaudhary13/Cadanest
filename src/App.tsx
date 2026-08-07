@@ -19,7 +19,7 @@ import {
 import { FlatPreviewer } from './components/FlatPreviewer';
 import { Model3DViewer, getMaterialColorCss } from './components/Model3DViewer';
 import { JobGroupTab } from './components/JobGroupTab';
-import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, STANDARD_SHEET_SIZES, DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_ETCH_MARKER_POSITION, NESTING_MATERIAL_OPTIONS, KFACTOR_MATERIAL_PRESET_NAMES, PartItem, FlatElementItem } from './store/useCadanestStore';
+import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, STANDARD_SHEET_SIZES, DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_ETCH_MARKER_POSITION, DEFAULT_DENSITY_KG_M3, NESTING_MATERIAL_OPTIONS, KFACTOR_MATERIAL_PRESET_NAMES, PartItem, FlatElementItem } from './store/useCadanestStore';
 
 declare global {
   interface Window {
@@ -614,7 +614,7 @@ export default function App() {
 
                   const assignedMatName = stdMat?.name || rawMatName;
                   const assignedMatCode = stdMat?.code || 'MS';
-                  const assignedDensity = stdMat?.density || 7850;
+                  const assignedDensity = stdMat?.density || DEFAULT_DENSITY_KG_M3;
 
                   const partItem: PartItem = {
                     id: partId,
@@ -825,7 +825,7 @@ export default function App() {
               thickness: response.thickness,
               material: response.material || 'MS',
               materialName: response.material_name || 'Mild Steel',
-              density: response.density || 7850,
+              density: response.density || DEFAULT_DENSITY_KG_M3,
               totalFaces: response.total_face_count,
               planarFaces: response.planar_face_count,
               faces: response.faces,
@@ -3644,7 +3644,7 @@ export default function App() {
                           <div className="font-bold flex items-center gap-1.5 flex-wrap" style={{ color: getMaterialColorCss(selectedPart.materialName || selectedPart.material) }}>
                             <span>{selectedPart.materialName || selectedPart.material || 'Mild Steel'}</span>
                             <span className="text-[9px] px-1 py-0.2 rounded bg-industrial-darker border border-industrial-border opacity-80 text-industrial-muted font-mono">
-                              {selectedPart.density || 7850} kg/m³
+                              {selectedPart.density || DEFAULT_DENSITY_KG_M3} kg/m³
                             </span>
                           </div>
                           
@@ -4506,7 +4506,7 @@ export default function App() {
             <div className="text-industrial-muted font-bold">Material:</div>
             <div className="text-right font-bold flex items-center justify-end gap-1" style={{ color: getMaterialColorCss(hoveredPart.materialName || hoveredPart.material) }}>
               <span>{hoveredPart.materialName || hoveredPart.material || 'Mild Steel'}</span>
-              <span className="text-[8px] font-normal text-industrial-muted">({hoveredPart.density || 7850}kg/m³)</span>
+              <span className="text-[8px] font-normal text-industrial-muted">({hoveredPart.density || DEFAULT_DENSITY_KG_M3}kg/m³)</span>
             </div>
 
             <div className="text-industrial-muted">Est. Thickness:</div>
