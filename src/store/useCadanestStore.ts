@@ -97,6 +97,36 @@ export const DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5;
 export const DEFAULT_BEND_STYLE = 'tick';
 export const DEFAULT_ETCH_MARKER_POSITION: 'interior' | 'boundary' = 'interior';
 
+export interface NestingMaterialOption {
+  value: string;
+  label: string;
+}
+
+// Single source of truth for the sheet-stock material dropdown used by the
+// nesting settings panel. Both copies of this dropdown in App.tsx map over it.
+export const NESTING_MATERIAL_OPTIONS: NestingMaterialOption[] = [
+  { value: 'Steel', label: 'Mild Steel' },
+  { value: 'Stainless', label: 'Stainless Steel' },
+  { value: 'Aluminum', label: 'Aluminum' },
+  { value: 'Copper', label: 'Copper' },
+  { value: 'Brass', label: 'Brass' },
+];
+
+// Curated subset + display order of STANDARD_MATERIALS shown in the K-factor
+// preset dropdown's "Material Catalog Presets" group. The K-factor value shown
+// alongside each label is looked up from STANDARD_MATERIALS at render time
+// (App.tsx) rather than typed here, so it can't drift out of sync.
+export const KFACTOR_MATERIAL_PRESET_NAMES: NestingMaterialOption[] = [
+  { value: 'Mild Steel', label: 'Mild Steel / CRCA' },
+  { value: 'Stainless Steel 304', label: 'Stainless Steel 304' },
+  { value: 'Stainless Steel 316', label: 'Stainless Steel 316' },
+  { value: 'Aluminium 5052', label: 'Aluminium 5052' },
+  { value: 'Aluminium 6061', label: 'Aluminium 6061' },
+  { value: 'Galvanized Iron', label: 'Galvanized Iron' },
+  { value: 'Copper', label: 'Copper' },
+  { value: 'Brass', label: 'Brass' },
+];
+
 export interface PartItem {
   id: string;
   name: string;

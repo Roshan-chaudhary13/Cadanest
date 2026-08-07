@@ -19,7 +19,7 @@ import {
 import { FlatPreviewer } from './components/FlatPreviewer';
 import { Model3DViewer, getMaterialColorCss } from './components/Model3DViewer';
 import { JobGroupTab } from './components/JobGroupTab';
-import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, STANDARD_SHEET_SIZES, DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_ETCH_MARKER_POSITION, PartItem, FlatElementItem } from './store/useCadanestStore';
+import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, STANDARD_SHEET_SIZES, DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_ETCH_MARKER_POSITION, NESTING_MATERIAL_OPTIONS, KFACTOR_MATERIAL_PRESET_NAMES, PartItem, FlatElementItem } from './store/useCadanestStore';
 
 declare global {
   interface Window {
@@ -2173,11 +2173,9 @@ export default function App() {
                       onChange={(e) => setNestingMaterial(e.target.value)}
                       className="w-full bg-industrial-darker border border-industrial-border px-1.5 py-1 rounded text-[10px] text-industrial-text outline-none"
                     >
-                      <option value="Steel">Mild Steel</option>
-                      <option value="Stainless">Stainless Steel</option>
-                      <option value="Aluminum">Aluminum</option>
-                      <option value="Copper">Copper</option>
-                      <option value="Brass">Brass</option>
+                      {NESTING_MATERIAL_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
                     </select>
                   </div>
                   <div className="flex flex-col gap-1">
@@ -2881,14 +2879,11 @@ export default function App() {
                       ))}
                     </optgroup>
                     <optgroup label="--- Material Catalog Presets ---">
-                      <option value="Mild Steel">Mild Steel / CRCA (K = 0.440000)</option>
-                      <option value="Stainless Steel 304">Stainless Steel 304 (K = 0.450000)</option>
-                      <option value="Stainless Steel 316">Stainless Steel 316 (K = 0.450000)</option>
-                      <option value="Aluminium 5052">Aluminium 5052 (K = 0.400000)</option>
-                      <option value="Aluminium 6061">Aluminium 6061 (K = 0.400000)</option>
-                      <option value="Galvanized Iron">Galvanized Iron (K = 0.420000)</option>
-                      <option value="Copper">Copper (K = 0.380000)</option>
-                      <option value="Brass">Brass (K = 0.400000)</option>
+                      {KFACTOR_MATERIAL_PRESET_NAMES.map(opt => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label} (K = {STANDARD_MATERIALS.find(m => m.name === opt.value)!.kFactor.toFixed(6)})
+                        </option>
+                      ))}
                     </optgroup>
                   </select>
 
@@ -3224,11 +3219,9 @@ export default function App() {
                     onChange={(e) => setNestingMaterial(e.target.value)}
                     className="w-full bg-industrial-darker border border-industrial-border px-2 py-1.5 rounded text-xs text-industrial-text font-mono focus:border-industrial-accent outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <option value="Steel">Mild Steel</option>
-                    <option value="Stainless">Stainless Steel</option>
-                    <option value="Aluminum">Aluminum</option>
-                    <option value="Copper">Copper</option>
-                    <option value="Brass">Brass</option>
+                    {NESTING_MATERIAL_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
                   </select>
                 </div>
 
