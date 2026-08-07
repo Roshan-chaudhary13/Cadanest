@@ -27,6 +27,23 @@ if (fs.existsSync(portablePython)) {
 const daemonScriptPath = path.join(__dirname, '../backend/daemon.py');
 const daemonClient = new DaemonClient(pythonPath, daemonScriptPath);
 
+// Default etch/tick mark length (mm) for bend-line indicators — mirrors
+// DEFAULT_ETCH_MARKER_LENGTH_MM in backend/unfold/bend_math.py and src/store/useCadanestStore.ts.
+const DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5;
+
+// Default sheet thickness (mm) — mirrors DEFAULT_THICKNESS_MM in
+// backend/unfold/bend_math.py and src/store/useCadanestStore.ts.
+const DEFAULT_THICKNESS_MM = 2.0;
+
+// Single source of truth for the output directory every IPC handler exports into.
+function getExportsDir(): string {
+  const exportsDir = path.join(app.getPath('desktop'), 'Cadanest', 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  return exportsDir;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -107,11 +124,7 @@ ipcMain.handle('select-file', async () => {
 
 // IPC Handler to parse direct DXF files
 ipcMain.handle('parse-dxf', async (_event, dxfPath: string) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
   const baseName = path.basename(dxfPath, path.extname(dxfPath));
   const svgPreviewOut = path.join(exportsDir, `${baseName}_preview.svg`);
   return daemonClient.sendRequest('parse_dxf', { dxfPath, svgPreviewOut });
@@ -119,21 +132,13 @@ ipcMain.handle('parse-dxf', async (_event, dxfPath: string) => {
 
 // IPC Handler to parse Solid Edge & CAD assembly files (.asm, .psm, .par, .sldprt, .sldasm)
 ipcMain.handle('parse-cad-assembly', async (_event, filePath: string) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
   return daemonClient.sendRequest('parse_cad_assembly', { filePath, exportDir: exportsDir });
 });
 
 // IPC Handler to batch-resolve & convert an assembly's .psm children to STEP
 ipcMain.handle('parse-cad-assembly-batch', async (_event, asmPath: string) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
   return daemonClient.sendRequest('parse_cad_assembly_batch', { asmPath, exportDir: exportsDir });
 });
 
@@ -168,11 +173,7 @@ ipcMain.handle('cancel-process', async () => {
 
 // IPC Handler to run fast 3D analysis & generate preview SVG & STL
 ipcMain.handle('run-analyze', async (_event, stepPath: string, originalPath?: string) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
   const baseName = path.basename(stepPath, path.extname(stepPath));
   const svgPreviewOut = path.join(exportsDir, `${baseName}_preview.svg`);
   const stlPreviewOut = path.join(exportsDir, `${baseName}_preview.stl`);
@@ -190,11 +191,7 @@ ipcMain.handle('run-analyze', async (_event, stepPath: string, originalPath?: st
 
 // IPC Handler to batch run 3D geometry analysis in parallel via daemon multi-threading
 ipcMain.handle('run-analyze-batch', async (_event, items: { stepPath: string; originalPath?: string }[]) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
 
   const preparedItems = items.map((item) => {
     const baseName = path.basename(item.stepPath, path.extname(item.stepPath));
@@ -224,11 +221,7 @@ ipcMain.handle('run-analyze-batch', async (_event, items: { stepPath: string; or
 // IPC Handler to run OpenCASCADE unfolding
 ipcMain.handle('run-unfold', async (_event, args: { stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string; mirror?: boolean; exportMinimalDimpleHoles?: boolean; bendRadius?: number; etchMarkerPosition?: string; etchMarkerLength?: number }) => {
   const { stepPath, kfactor, baseFace, excludeBendLines, bendStyle, mirror, exportMinimalDimpleHoles, bendRadius, etchMarkerPosition, etchMarkerLength } = args;
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
   const baseName = path.basename(stepPath, path.extname(stepPath));
   const baseFaceSuffix = baseFace ? `_${baseFace.replace(/[^a-zA-Z0-9]/g, '_')}` : '';
   const mirrorSuffix = mirror ? '_MIR' : '';
@@ -247,7 +240,7 @@ ipcMain.handle('run-unfold', async (_event, args: { stepPath: string; kfactor: n
     export_minimal_dimple_holes: exportMinimalDimpleHoles !== false,
     bendRadius,
     etchMarkerPosition: etchMarkerPosition || 'interior',
-    etchMarkerLength: etchMarkerLength || 4.5
+    etchMarkerLength: etchMarkerLength || DEFAULT_ETCH_MARKER_LENGTH_MM
   });
 
   if (res && res.status === 'success') {
@@ -262,11 +255,7 @@ ipcMain.handle('run-unfold', async (_event, args: { stepPath: string; kfactor: n
 
 // IPC Handler to run batch unfolding in parallel via daemon multi-threading
 ipcMain.handle('run-unfold-batch', async (_event, items: Array<{ stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string; mirror?: boolean; exportMinimalDimpleHoles?: boolean; bendRadius?: number; etchMarkerPosition?: string; etchMarkerLength?: number }>) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
 
   const preparedItems = items.map((item) => {
     const baseName = path.basename(item.stepPath, path.extname(item.stepPath));
@@ -285,7 +274,7 @@ ipcMain.handle('run-unfold-batch', async (_event, items: Array<{ stepPath: strin
       export_minimal_dimple_holes: item.exportMinimalDimpleHoles !== false,
       bendRadius: item.bendRadius,
       etchMarkerPosition: item.etchMarkerPosition || 'interior',
-      etchMarkerLength: item.etchMarkerLength || 4.5,
+      etchMarkerLength: item.etchMarkerLength || DEFAULT_ETCH_MARKER_LENGTH_MM,
       dxfOut,
       svgOut
     };
@@ -306,8 +295,7 @@ ipcMain.handle('run-unfold-batch', async (_event, items: Array<{ stepPath: strin
 
 // IPC Handler to run BULK STEP processing
 ipcMain.handle('run-batch-step', async (_event, args: { filePaths: string[]; kfactor?: number; bendStyle?: string; outputDir?: string }) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = args.outputDir || path.join(desktopPath, 'exports', `Batch_${Date.now()}`);
+  const exportsDir = args.outputDir || path.join(getExportsDir(), `Batch_${Date.now()}`);
   if (!fs.existsSync(exportsDir)) {
     fs.mkdirSync(exportsDir, { recursive: true });
   }
@@ -352,11 +340,7 @@ ipcMain.handle('run-nesting', async (_event, args: {
     etchMarkerLength?: number;
   }>;
 }) => {
-  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-  const exportsDir = path.join(desktopPath, 'exports');
-  if (!fs.existsSync(exportsDir)) {
-    fs.mkdirSync(exportsDir, { recursive: true });
-  }
+  const exportsDir = getExportsDir();
   const filename = args.exportFilename || `nested_${Date.now()}.dxf`;
   const exportDxfOut = path.join(exportsDir, filename);
 
@@ -385,7 +369,7 @@ ipcMain.handle('run-nesting', async (_event, args: {
       name: (p as any).name || null,
       group: (p as any).group || null,
       material: (p as any).material || 'Mild Steel',
-      thickness: typeof (p as any).thickness === 'number' ? (p as any).thickness : 2.0,
+      thickness: typeof (p as any).thickness === 'number' ? (p as any).thickness : DEFAULT_THICKNESS_MM,
       bend_radius: p.bendRadius || null
     }))
   });

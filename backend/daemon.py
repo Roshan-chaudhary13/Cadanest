@@ -41,6 +41,11 @@ try:
 except Exception as e:
     sys.stderr.write(f"Daemon warm-load warning: {e}\n")
 
+try:
+    from unfold.bend_math import DEFAULT_ETCH_MARKER_LENGTH_MM
+except Exception:
+    DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5
+
 
 def send_ipc(data: dict):
     """Writes clean line-delimited JSON to raw stdout."""
@@ -211,7 +216,7 @@ def handle_run_unfold(req_id: str, params: dict) -> dict:
 
     bend_radius = params.get("bendRadius") or params.get("bend_radius")
     etch_marker_position = params.get("etchMarkerPosition") or params.get("etch_marker_position") or "interior"
-    etch_marker_length = float(params.get("etchMarkerLength") or params.get("etch_marker_length") or 4.5)
+    etch_marker_length = float(params.get("etchMarkerLength") or params.get("etch_marker_length") or DEFAULT_ETCH_MARKER_LENGTH_MM)
     
     if not step_path or not os.path.exists(step_path):
         return {"status": "error", "error": f"STEP file not found: {step_path}"}

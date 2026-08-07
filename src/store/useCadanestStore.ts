@@ -70,6 +70,28 @@ export const CAD_PRESETS_CATALOG: CadPresetOption[] = [
   { id: 'brass', label: 'Brass Sheet', category: 'material', value: STANDARD_MATERIALS.find(m => m.name === 'Brass')!.kFactor, software: 'Material', description: 'Brass sheet metal default K=0.400' },
 ];
 
+export interface SheetSizeOption {
+  width: number;
+  height: number;
+  label: string;
+}
+
+// Single source of truth for standard sheet stock sizes, sorted smallest to largest.
+// The sheet-size dropdown, the auto-upsize-on-capacity-exceeded logic, and the
+// "already at maximum size" messaging in App.tsx all derive from this list.
+export const STANDARD_SHEET_SIZES: SheetSizeOption[] = [
+  { width: 1500, height: 1000, label: 'Small' },
+  { width: 2500, height: 1250, label: 'Standard' },
+  { width: 3000, height: 1500, label: 'Standard Large' },
+  { width: 4000, height: 2000, label: 'Oversized' },
+];
+
+// Default sheet thickness (mm) used whenever a part/sheet's thickness is unknown.
+export const DEFAULT_THICKNESS_MM = 2.0;
+
+// Default etch/tick mark length (mm) for bend-line indicators in DXF/SVG export.
+export const DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5;
+
 export interface PartItem {
   id: string;
   name: string;
@@ -363,7 +385,7 @@ export const useCadanestStore = create<CadanestState>((set, get) => ({
 
     flatElements.forEach((elem) => {
       const matName = elem.material || 'Mild Steel';
-      const thick = elem.thickness || 2.0;
+      const thick = elem.thickness || DEFAULT_THICKNESS_MM;
 
       // Find matching standard material or fallback
       let matInfo = STANDARD_MATERIALS.find(

@@ -18,6 +18,7 @@ try:
     if _here not in sys.path:
         sys.path.insert(0, _here)
     from unfold.bend_math import get_k_factor as _get_k_factor
+    from unfold.bend_math import DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM
 except Exception:
     def _get_k_factor(material: str = "steel") -> float:  # type: ignore[misc]
         """Fallback if bend_math unavailable at import time."""
@@ -25,6 +26,8 @@ except Exception:
               "aluminum": 0.40, "aluminium": 0.40, "default": 0.44}
         key = (material or "default").lower().replace(" ", "_")
         return _K.get(key, _K["default"])
+    DEFAULT_THICKNESS_MM = 2.0
+    DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5
 
 def _add_occ_paths():
     candidates = [
@@ -433,7 +436,7 @@ def auto_discover_base_faces(shape, faces, classification, thickness=None):
 
 
 
-def unfold_with_occ(step_path, kfactor, dxf_path, svg_path, base_face_name=None, exclude_bend_lines=False, bend_line_style="tick", mirror=False, minimal_dimple_holes=True, bend_radius=None, etch_marker_position="interior", etch_marker_length=4.5):
+def unfold_with_occ(step_path, kfactor, dxf_path, svg_path, base_face_name=None, exclude_bend_lines=False, bend_line_style="tick", mirror=False, minimal_dimple_holes=True, bend_radius=None, etch_marker_position="interior", etch_marker_length=DEFAULT_ETCH_MARKER_LENGTH_MM):
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)
@@ -481,7 +484,7 @@ def unfold_with_occ(step_path, kfactor, dxf_path, svg_path, base_face_name=None,
 
         thickness = detect_thickness(faces, classification)
         if thickness is None:
-            thickness = 2.0
+            thickness = DEFAULT_THICKNESS_MM
 
         faces_meta = []
         for i, c in enumerate(classification):
@@ -692,7 +695,7 @@ def analyze_only_with_occ(step_path, svg_preview_path=None, stl_preview_path=Non
         classification = [classify_face(f) for f in faces]
         thickness = detect_thickness(faces, classification)
         if thickness is None:
-            thickness = 2.0
+            thickness = DEFAULT_THICKNESS_MM
 
         sheet_metal_indices = get_component_sheet_metal_status(shape, faces, classification, thickness)
         faces_meta = [

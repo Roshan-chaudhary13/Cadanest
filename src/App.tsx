@@ -19,7 +19,7 @@ import {
 import { FlatPreviewer } from './components/FlatPreviewer';
 import { Model3DViewer, getMaterialColorCss } from './components/Model3DViewer';
 import { JobGroupTab } from './components/JobGroupTab';
-import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, PartItem, FlatElementItem } from './store/useCadanestStore';
+import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, STANDARD_SHEET_SIZES, DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM, PartItem, FlatElementItem } from './store/useCadanestStore';
 
 declare global {
   interface Window {
@@ -303,7 +303,7 @@ export default function App() {
   const [showPreFlattenModal, setShowPreFlattenModal] = useState<boolean>(false);
   const [bendStyle, setBendStyle] = useState<string>('dashed');
   const [etchMarkerPosition, setEtchMarkerPosition] = useState<'interior' | 'boundary'>('interior');
-  const [etchMarkerLength, setEtchMarkerLength] = useState<number>(4.5);
+  const [etchMarkerLength, setEtchMarkerLength] = useState<number>(DEFAULT_ETCH_MARKER_LENGTH_MM);
   const [exportMinimalDimpleHoles, setExportMinimalDimpleHoles] = useState<boolean>(true);
   const [allowPartInPart, setAllowPartInPart] = useState<boolean>(true);
 
@@ -673,7 +673,7 @@ export default function App() {
           if (response.status === 'success') {
             const meta = response.metadata || {};
             const material = meta.material || 'Default Steel';
-            const thickness = meta.thickness || 2.0;
+            const thickness = meta.thickness || DEFAULT_THICKNESS_MM;
             const targetStep = response.step_path || filePath;
 
             // Analyze and auto-unfold STEP model to generate flat pattern with bend markers immediately
@@ -1046,7 +1046,7 @@ export default function App() {
 
   useEffect(() => {
     if (nestedSheets[activeSheetIndex]) {
-      const matKey = `${(nestedSheets[activeSheetIndex] as any).material || 'Mild Steel'} (${(nestedSheets[activeSheetIndex] as any).thickness || 2.0}mm)`;
+      const matKey = `${(nestedSheets[activeSheetIndex] as any).material || 'Mild Steel'} (${(nestedSheets[activeSheetIndex] as any).thickness || DEFAULT_THICKNESS_MM}mm)`;
       if (selectedMaterialFilter !== 'ALL' && selectedMaterialFilter !== matKey) {
         setSelectedMaterialFilter(matKey);
       }
@@ -1367,7 +1367,7 @@ export default function App() {
             etchMarkerLength: ae.part.etchMarkerLength || etchMarkerLength,
             group: ae.element.group || null,
             material: ae.part.materialName || ae.part.material || 'Mild Steel',
-            thickness: ae.part.thickness || 2.0
+            thickness: ae.part.thickness || DEFAULT_THICKNESS_MM
           };
         })
       });
@@ -1376,7 +1376,7 @@ export default function App() {
         const sheets = (response.sheets || []).map((s: any) => ({
           index: s.index,
           material: s.material || 'Mild Steel',
-          thickness: s.thickness || 2.0,
+          thickness: s.thickness || DEFAULT_THICKNESS_MM,
           utilization: s.utilization,
           dxfPath: s.dxf_path,
           pdfPath: s.pdf_path,
@@ -1397,12 +1397,10 @@ export default function App() {
         const hasCapacityExceeded = sheets.length > 1 || (response.total_count !== undefined && response.total_count < totalPartsRequested);
         if (hasCapacityExceeded && totalPartsRequested !== lastConfirmedMultiSheetQtyRef.current) {
           const getRecommendedLargerSize = (w: number, h: number) => {
-            if (w <= 2500 && h <= 1250) {
-              return { width: 3000, height: 1500, name: "Standard Large (3000 x 1500 mm)" };
-            } else if (w <= 3000 && h <= 1500) {
-              return { width: 4000, height: 2000, name: "Oversized (4000 x 2000 mm)" };
-            }
-            return null;
+            const currentTierIdx = STANDARD_SHEET_SIZES.findIndex(size => w <= size.width && h <= size.height);
+            const next = currentTierIdx >= 0 ? STANDARD_SHEET_SIZES[currentTierIdx + 1] : undefined;
+            if (!next) return null;
+            return { width: next.width, height: next.height, name: `${next.label} (${next.width} x ${next.height} mm)` };
           };
 
           if (sheetDefaultStrategy === 'count') {
@@ -3030,9 +3028,11 @@ export default function App() {
                   disabled={isAnalyzing || isUnfolding || isNesting}
                   className="w-full bg-industrial-darker border border-industrial-border px-3 py-2 rounded text-sm text-industrial-text font-mono focus:border-industrial-accent outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <option value="2500x1250">Standard: 2500 x 1250 mm</option>
-                  <option value="3000x1500">Large: 3000 x 1500 mm</option>
-                  <option value="1500x1000">Small: 1500 x 1000 mm</option>
+                  {STANDARD_SHEET_SIZES.map(size => (
+                    <option key={`${size.width}x${size.height}`} value={`${size.width}x${size.height}`}>
+                      {size.label}: {size.width} x {size.height} mm
+                    </option>
+                  ))}
                   <option value="custom">Custom Size...</option>
                   <option value="remnant_rect">Remnant: Custom Rectangular</option>
                   <option value="remnant_lshape">Remnant: L-Shape Profile</option>
@@ -3779,7 +3779,7 @@ export default function App() {
                       <FlatPreviewer 
                         svgContent={combinedSvgContent} 
                         baseFace="Combined Flat Scene" 
-                        thickness={parts[0]?.thickness || 2.0} 
+                        thickness={parts[0]?.thickness || DEFAULT_THICKNESS_MM} 
                         onToggleFullScreen={() => setFullScreenView('flat')}
                         themeMode={themeMode}
                       />
@@ -3855,7 +3855,7 @@ export default function App() {
                           onToggleFullScreen={() => setFullScreenView('flat')}
                           svgContent={activeSvg} 
                           baseFace={activeFe ? activeFe.baseFace : null} 
-                          thickness={selectedPart ? selectedPart.thickness : 2.0} 
+                          thickness={selectedPart ? selectedPart.thickness : DEFAULT_THICKNESS_MM}
                           rotationAngle={activeRot}
                           onRemoveComponent={(faceName) => {
                             if (selectedPart) {
@@ -3930,15 +3930,15 @@ export default function App() {
                         All Sheets ({nestedSheets.length})
                       </button>
 
-                      {Array.from(new Set(nestedSheets.map(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)`))).map(matKey => {
-                        const matchingSheets = nestedSheets.filter(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)` === matKey);
+                      {Array.from(new Set(nestedSheets.map(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || DEFAULT_THICKNESS_MM}mm)`))).map(matKey => {
+                        const matchingSheets = nestedSheets.filter(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || DEFAULT_THICKNESS_MM}mm)` === matKey);
                         return (
                           <button
                             key={matKey}
                             type="button"
                             onClick={() => {
                               setSelectedMaterialFilter(matKey);
-                              const firstMatchingIdx = nestedSheets.findIndex(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)` === matKey);
+                              const firstMatchingIdx = nestedSheets.findIndex(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || DEFAULT_THICKNESS_MM}mm)` === matKey);
                               if (firstMatchingIdx >= 0) {
                                 setActiveSheetIndex(firstMatchingIdx);
                                 setNestingSvg(nestedSheets[firstMatchingIdx].svgContent);
@@ -3979,7 +3979,7 @@ export default function App() {
                 {(() => {
                   const displayedSheets = selectedMaterialFilter === 'ALL'
                     ? nestedSheets
-                    : nestedSheets.filter(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)` === selectedMaterialFilter);
+                    : nestedSheets.filter(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || DEFAULT_THICKNESS_MM}mm)` === selectedMaterialFilter);
 
                   if (viewMode === 'grid' && nestedSheets.length > 1) {
                     return (
@@ -4010,7 +4010,7 @@ export default function App() {
                                       SHEET {sheet.index}
                                     </span>
                                     <span className="px-2 py-0.5 text-[9px] font-bold text-blue-400 bg-blue-500/10 border border-blue-500/20 rounded">
-                                      {(sheet as any).material || 'Mild Steel'} ({(sheet as any).thickness || 2.0}mm)
+                                      {(sheet as any).material || 'Mild Steel'} ({(sheet as any).thickness || DEFAULT_THICKNESS_MM}mm)
                                     </span>
                                   </div>
                                   <span className="text-industrial-orange font-semibold">{sheet.utilization}% Utilization</span>
@@ -4061,7 +4061,7 @@ export default function App() {
                     {nestedSheets.length > 0 && (() => {
                       const curSheet = nestedSheets[activeSheetIndex] || nestedSheets[0];
                       const matName = (curSheet as any).material || 'Mild Steel';
-                      const thickVal = (curSheet as any).thickness || 2.0;
+                      const thickVal = (curSheet as any).thickness || DEFAULT_THICKNESS_MM;
                       const sheetAreaM2 = (sheetWidth * sheetHeight) / 1000000;
                       const usedAreaM2 = (sheetAreaM2 * (curSheet.utilization / 100));
                       const scrapAreaM2 = (sheetAreaM2 - usedAreaM2);
@@ -4071,7 +4071,7 @@ export default function App() {
                         const matClean = ((sheet?.material || 'Mild_Steel') as string)
                           .replace(/[^a-zA-Z0-9]+/g, '_')
                           .replace(/^_+|_+$/g, '');
-                        const thickClean = `${sheet?.thickness || 2.0}mm`;
+                        const thickClean = `${sheet?.thickness || DEFAULT_THICKNESS_MM}mm`;
                         const idxStr = `Sheet_${sheet?.index || (activeSheetIndex + 1)}_of_${nestedSheets.length}`;
                         const dimStr = `${sheetWidth}x${sheetHeight}mm`;
                         return `Cadanest_${matClean}_${thickClean}_${idxStr}_${dimStr}.${ext}`;
@@ -4588,7 +4588,7 @@ export default function App() {
                   </button>
                 ) : (
                   <div className="p-3 bg-industrial-darker/20 border border-dashed border-industrial-border/60 rounded text-[10px] text-industrial-muted text-center leading-relaxed">
-                    Already at maximum standard sheet size (4000x2000 mm). Upsize option unavailable.
+                    Already at maximum standard sheet size ({STANDARD_SHEET_SIZES[STANDARD_SHEET_SIZES.length - 1].width}x{STANDARD_SHEET_SIZES[STANDARD_SHEET_SIZES.length - 1].height} mm). Upsize option unavailable.
                   </div>
                 )}
               </div>
@@ -5075,7 +5075,7 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
               <FlatPreviewer 
                 svgContent={combinedSvgContent} 
                 baseFace="Combined Flat Scene" 
-                thickness={parts[0]?.thickness || 2.0} 
+                thickness={parts[0]?.thickness || DEFAULT_THICKNESS_MM} 
                 onToggleFullScreen={() => setFullScreenView(null)}
                 themeMode={themeMode}
               />
@@ -5278,7 +5278,7 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
             <FlatPreviewer 
               svgContent={nestingSvg} 
               baseFace="Combined Sheet Layout" 
-              thickness={parts[0]?.thickness || 2.0} 
+              thickness={parts[0]?.thickness || DEFAULT_THICKNESS_MM} 
               is3dView={false}
               title={`Nesting Sheet ${activeSheetIndex + 1} (${nestingUtilization}% Eff.)`}
               onToggleFullScreen={() => setFullScreenView(null)}
@@ -5475,7 +5475,7 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
                     const targetSheet = nestedSheets[exportSelectedSheetIdx] || { dxfPath: nestingDxfPath, pdfPath: nestingPdfPath, gcodePath: nestingGcodePath };
                     if (targetSheet.dxfPath) {
                       const matClean = (((targetSheet as any).material || 'Mild_Steel') as string).replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-                      const thickClean = `${(targetSheet as any).thickness || 2.0}mm`;
+                      const thickClean = `${(targetSheet as any).thickness || DEFAULT_THICKNESS_MM}mm`;
                       const defaultName = `Cadanest_${matClean}_${thickClean}_Sheet_${exportSelectedSheetIdx + 1}_of_${nestedSheets.length}_${sheetWidth}x${sheetHeight}mm.dxf`;
                       await window.electronAPI.saveFileAs({
                         sourcePath: targetSheet.dxfPath,
@@ -5497,7 +5497,7 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
                         const s = nestedSheets[i];
                         if (s.dxfPath) {
                           const matClean = (((s as any).material || 'Mild_Steel') as string).replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-                          const thickClean = `${(s as any).thickness || 2.0}mm`;
+                          const thickClean = `${(s as any).thickness || DEFAULT_THICKNESS_MM}mm`;
                           const defaultName = `Cadanest_${matClean}_${thickClean}_Sheet_${i + 1}_of_${nestedSheets.length}_${sheetWidth}x${sheetHeight}mm.dxf`;
                           await window.electronAPI.saveFileAs({
                             sourcePath: s.dxfPath,

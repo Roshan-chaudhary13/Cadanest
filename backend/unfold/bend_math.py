@@ -35,6 +35,12 @@ K_FACTORS = {
     "steel": 0.440000,
 }
 
+# Default sheet thickness (mm) used whenever thickness can't be estimated from geometry.
+DEFAULT_THICKNESS_MM = 2.0
+
+# Default etch/tick mark length (mm) for bend-line indicators in DXF/SVG export.
+DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5
+
 
 def y_factor_to_k_factor(y: float) -> float:
     """Converts PTC Creo Y-Factor to K-Factor: K = Y * (2 / pi)"""

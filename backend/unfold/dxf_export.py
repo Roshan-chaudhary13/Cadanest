@@ -9,7 +9,7 @@ import os
 import numpy as np
 import shapely.geometry as sg
 from shapely.ops import polygonize, unary_union
-from .bend_math import calculate_outside_setback
+from .bend_math import calculate_outside_setback, DEFAULT_ETCH_MARKER_LENGTH_MM
 
 def get_edge_points(edge, steps=30):
     """
@@ -976,7 +976,7 @@ def export_to_dxf_and_svg(
     exclude_bend_lines: bool = False, bend_line_style: str = "tick",
     minimal_dimple_holes: bool = True, other_features: list = None,
     down_features: list = None, up_features: list = None,
-    etch_marker_position: str = "interior", etch_marker_length: float = 4.5,
+    etch_marker_position: str = "interior", etch_marker_length: float = DEFAULT_ETCH_MARKER_LENGTH_MM,
     kfactor: float = 0.44
 ):
     """

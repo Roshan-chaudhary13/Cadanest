@@ -13,7 +13,7 @@ from .face_graph import (
     find_face_index,
     get_face_center
 )
-from .bend_math import calculate_bend_allowance, calculate_outside_setback, get_k_factor_for_bend
+from .bend_math import calculate_bend_allowance, calculate_outside_setback, get_k_factor_for_bend, DEFAULT_THICKNESS_MM
 
 def find_shared_endpoints_and_geometry(face1, face2):
     """
@@ -906,7 +906,7 @@ def unfold_sheet_metal(shape, thickness: float = None, k_factor: float = 0.44, r
     if thickness is None:
         thickness = detect_thickness(faces, classification)
         if thickness is None:
-            thickness = 2.0
+            thickness = DEFAULT_THICKNESS_MM
             
     raw_adj = build_face_adjacency_graph(shape, faces)
     planar_adj = build_planar_adjacency(faces, classification, raw_adj, thickness)

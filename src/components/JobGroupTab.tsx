@@ -1,5 +1,5 @@
 import React from 'react';
-import { useCadanestStore, JobGroup, STANDARD_MATERIALS } from '../store/useCadanestStore';
+import { useCadanestStore, JobGroup, STANDARD_MATERIALS, DEFAULT_THICKNESS_MM } from '../store/useCadanestStore';
 import { PartItem } from '../App';
 import { Layers, FileCode, ChevronRight } from 'lucide-react';
 
@@ -16,7 +16,7 @@ export const JobGroupTab: React.FC<JobGroupTabProps> = ({ parts, onSelectGroupFo
 
     parts.forEach((part) => {
       const matName = part.materialName || part.material || 'Mild Steel';
-      const thick = part.thickness || 2.0;
+      const thick = part.thickness || DEFAULT_THICKNESS_MM;
 
       let matInfo = STANDARD_MATERIALS.find(
         (m) => m.name.toLowerCase() === matName.toLowerCase() || m.code.toLowerCase() === matName.toLowerCase()
