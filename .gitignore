@@ -1,5 +1,23 @@
-node_modules/ 
+node_modules/
 dist/
 out/
 release/
 *.log
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local debug / one-off investigation scripts and scratch data (not part of the app)
+Testing/
+scratch/
+sample/
+backend/test_*
+backend/analyze_*.py
+backend/debug_*.py
+backend/inspect_*.py
+backend/compare_*.py
+backend/research_*.py
+backend/deep_*.py
+backend/scratch_*
