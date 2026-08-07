@@ -92,6 +92,11 @@ export const DEFAULT_THICKNESS_MM = 2.0;
 // Default etch/tick mark length (mm) for bend-line indicators in DXF/SVG export.
 export const DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5;
 
+// Default bend-line rendering style and etch marker position — mirror
+// DEFAULT_BEND_STYLE / DEFAULT_ETCH_MARKER_POSITION in backend/unfold/bend_math.py.
+export const DEFAULT_BEND_STYLE = 'tick';
+export const DEFAULT_ETCH_MARKER_POSITION: 'interior' | 'boundary' = 'interior';
+
 export interface PartItem {
   id: string;
   name: string;

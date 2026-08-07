@@ -24,9 +24,11 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    from unfold.bend_math import DEFAULT_ETCH_MARKER_LENGTH_MM
+    from unfold.bend_math import DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_BEND_STYLE, DEFAULT_ETCH_MARKER_POSITION
 except Exception:
     DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5
+    DEFAULT_BEND_STYLE = "tick"
+    DEFAULT_ETCH_MARKER_POSITION = "interior"
 
 
 def load_polygon_from_dxf(dxf_path):
@@ -195,7 +197,7 @@ def load_polygon_from_dxf(dxf_path):
     return outer
 
 
-def unfold_part_to_temp_dxf(step_path, kfactor, base_face_name=None, minimal_dimple_holes=True, bend_radius=None, etch_marker_position="interior", etch_marker_length=DEFAULT_ETCH_MARKER_LENGTH_MM):
+def unfold_part_to_temp_dxf(step_path, kfactor, base_face_name=None, minimal_dimple_holes=True, bend_radius=None, etch_marker_position=DEFAULT_ETCH_MARKER_POSITION, etch_marker_length=DEFAULT_ETCH_MARKER_LENGTH_MM):
     from occ_unfold_bridge import unfold_with_occ
     
     fd, temp_dxf = tempfile.mkstemp(suffix=".dxf", prefix="nest_temp_")
@@ -508,11 +510,11 @@ def run_nesting_from_dict(config: dict) -> dict:
     export_dxf_path = config.get("export_dxf_path", "")
     auto_fill = config.get("auto_fill", False)
     exclude_bend_lines = config.get("exclude_bend_lines", False)
-    bend_style = str(config.get("bend_style") or config.get("bendStyle") or "tick").lower()
+    bend_style = str(config.get("bend_style") or config.get("bendStyle") or DEFAULT_BEND_STYLE).lower()
     rotations_deg = config.get("rotations", [0.0, 90.0, 180.0, 270.0])
     rotations = [math.radians(r) for r in rotations_deg]
     minimal_dimple_holes = config.get("export_minimal_dimple_holes", True)
-    global_etch_pos = config.get("etch_marker_position") or config.get("etchMarkerPosition") or "interior"
+    global_etch_pos = config.get("etch_marker_position") or config.get("etchMarkerPosition") or DEFAULT_ETCH_MARKER_POSITION
     global_etch_len = float(config.get("etch_marker_length") or config.get("etchMarkerLength") or DEFAULT_ETCH_MARKER_LENGTH_MM)
     
     if not export_dxf_path:

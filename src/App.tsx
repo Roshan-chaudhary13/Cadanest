@@ -19,7 +19,7 @@ import {
 import { FlatPreviewer } from './components/FlatPreviewer';
 import { Model3DViewer, getMaterialColorCss } from './components/Model3DViewer';
 import { JobGroupTab } from './components/JobGroupTab';
-import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, STANDARD_SHEET_SIZES, DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM, PartItem, FlatElementItem } from './store/useCadanestStore';
+import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, STANDARD_SHEET_SIZES, DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_ETCH_MARKER_POSITION, PartItem, FlatElementItem } from './store/useCadanestStore';
 
 declare global {
   interface Window {
@@ -302,7 +302,7 @@ export default function App() {
   };
   const [showPreFlattenModal, setShowPreFlattenModal] = useState<boolean>(false);
   const [bendStyle, setBendStyle] = useState<string>('dashed');
-  const [etchMarkerPosition, setEtchMarkerPosition] = useState<'interior' | 'boundary'>('interior');
+  const [etchMarkerPosition, setEtchMarkerPosition] = useState<'interior' | 'boundary'>(DEFAULT_ETCH_MARKER_POSITION);
   const [etchMarkerLength, setEtchMarkerLength] = useState<number>(DEFAULT_ETCH_MARKER_LENGTH_MM);
   const [exportMinimalDimpleHoles, setExportMinimalDimpleHoles] = useState<boolean>(true);
   const [allowPartInPart, setAllowPartInPart] = useState<boolean>(true);

@@ -17,7 +17,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from occ_unfold_bridge import unfold_with_occ
+from occ_unfold_bridge import unfold_with_occ, DEFAULT_BEND_STYLE
 from cache_manager import cleanup_memory
 
 def process_single_step_part(args):
@@ -36,7 +36,7 @@ def process_single_step_part(args):
     res["name"] = base_name
     return res
 
-def run_batch_step_processing(file_paths, output_dir, kfactor=0.44, bend_style="tick", max_workers=None):
+def run_batch_step_processing(file_paths, output_dir, kfactor=0.44, bend_style=DEFAULT_BEND_STYLE, max_workers=None):
     """
     Processes multiple STEP files in parallel, classifies them by thickness,
     and organizes generated 2D manufacturing drawings into output folders.

@@ -35,6 +35,11 @@ const DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5;
 // backend/unfold/bend_math.py and src/store/useCadanestStore.ts.
 const DEFAULT_THICKNESS_MM = 2.0;
 
+// Default bend-line style and etch marker position — mirror DEFAULT_BEND_STYLE /
+// DEFAULT_ETCH_MARKER_POSITION in backend/unfold/bend_math.py.
+const DEFAULT_BEND_STYLE = 'tick';
+const DEFAULT_ETCH_MARKER_POSITION = 'interior';
+
 // Single source of truth for the output directory every IPC handler exports into.
 function getExportsDir(): string {
   const exportsDir = path.join(app.getPath('desktop'), 'Cadanest', 'exports');
@@ -235,11 +240,11 @@ ipcMain.handle('run-unfold', async (_event, args: { stepPath: string; kfactor: n
     svgOut,
     baseFace: baseFace || 'auto',
     excludeBendLines: Boolean(excludeBendLines),
-    bendStyle: bendStyle || 'tick',
+    bendStyle: bendStyle || DEFAULT_BEND_STYLE,
     mirror: Boolean(mirror),
     export_minimal_dimple_holes: exportMinimalDimpleHoles !== false,
     bendRadius,
-    etchMarkerPosition: etchMarkerPosition || 'interior',
+    etchMarkerPosition: etchMarkerPosition || DEFAULT_ETCH_MARKER_POSITION,
     etchMarkerLength: etchMarkerLength || DEFAULT_ETCH_MARKER_LENGTH_MM
   });
 
@@ -269,11 +274,11 @@ ipcMain.handle('run-unfold-batch', async (_event, items: Array<{ stepPath: strin
       kfactor: item.kfactor,
       baseFace: item.baseFace || 'auto',
       excludeBendLines: Boolean(item.excludeBendLines),
-      bendStyle: item.bendStyle || 'tick',
+      bendStyle: item.bendStyle || DEFAULT_BEND_STYLE,
       mirror: Boolean(item.mirror),
       export_minimal_dimple_holes: item.exportMinimalDimpleHoles !== false,
       bendRadius: item.bendRadius,
-      etchMarkerPosition: item.etchMarkerPosition || 'interior',
+      etchMarkerPosition: item.etchMarkerPosition || DEFAULT_ETCH_MARKER_POSITION,
       etchMarkerLength: item.etchMarkerLength || DEFAULT_ETCH_MARKER_LENGTH_MM,
       dxfOut,
       svgOut
@@ -303,7 +308,7 @@ ipcMain.handle('run-batch-step', async (_event, args: { filePaths: string[]; kfa
     filePaths: args.filePaths,
     outputDir: exportsDir,
     kfactor: args.kfactor || 0.44,
-    bendStyle: args.bendStyle || 'tick'
+    bendStyle: args.bendStyle || DEFAULT_BEND_STYLE
   });
 });
 
@@ -356,7 +361,7 @@ ipcMain.handle('run-nesting', async (_event, args: {
     rotations: args.rotations || [0.0, 90.0, 180.0, 270.0],
     export_dxf_path: exportDxfOut,
     exclude_bend_lines: args.excludeBendLines || false,
-    bend_style: (args as any).bendStyle || 'tick',
+    bend_style: (args as any).bendStyle || DEFAULT_BEND_STYLE,
     allow_part_in_part: (args as any).allowPartInPart !== false,
     export_minimal_dimple_holes: (args as any).exportMinimalDimpleHoles !== false,
     parts: args.parts.map(p => ({

@@ -42,9 +42,11 @@ except Exception as e:
     sys.stderr.write(f"Daemon warm-load warning: {e}\n")
 
 try:
-    from unfold.bend_math import DEFAULT_ETCH_MARKER_LENGTH_MM
+    from unfold.bend_math import DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_BEND_STYLE, DEFAULT_ETCH_MARKER_POSITION
 except Exception:
     DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5
+    DEFAULT_BEND_STYLE = "tick"
+    DEFAULT_ETCH_MARKER_POSITION = "interior"
 
 
 def send_ipc(data: dict):
@@ -199,7 +201,7 @@ def handle_run_unfold(req_id: str, params: dict) -> dict:
     svg_out = params.get("svgOut") or params.get("svgPath") or params.get("svg_out")
     base_face = params.get("baseFace") or params.get("base_face")
     exclude_bend_lines = bool(params.get("excludeBendLines") or params.get("exclude_bend_lines"))
-    bend_style = params.get("bendStyle") or params.get("bend_style") or "tick"
+    bend_style = params.get("bendStyle") or params.get("bend_style") or DEFAULT_BEND_STYLE
     mirror = bool(params.get("mirror"))
     
     minimal_dimple_holes = params.get("minimalDimpleHoles")
@@ -215,7 +217,7 @@ def handle_run_unfold(req_id: str, params: dict) -> dict:
         minimal_dimple_holes = bool(minimal_dimple_holes)
 
     bend_radius = params.get("bendRadius") or params.get("bend_radius")
-    etch_marker_position = params.get("etchMarkerPosition") or params.get("etch_marker_position") or "interior"
+    etch_marker_position = params.get("etchMarkerPosition") or params.get("etch_marker_position") or DEFAULT_ETCH_MARKER_POSITION
     etch_marker_length = float(params.get("etchMarkerLength") or params.get("etch_marker_length") or DEFAULT_ETCH_MARKER_LENGTH_MM)
     
     if not step_path or not os.path.exists(step_path):
@@ -249,7 +251,7 @@ def handle_run_batch_step(req_id: str, params: dict) -> dict:
     file_paths = params.get("filePaths") or params.get("file_paths") or []
     output_dir = params.get("outputDir") or params.get("output_dir")
     kfactor = float(params.get("kfactor", 0.40))
-    bend_style = params.get("bendStyle") or params.get("bend_style") or "tick"
+    bend_style = params.get("bendStyle") or params.get("bend_style") or DEFAULT_BEND_STYLE
 
     if not file_paths:
         return {"status": "error", "error": "No file paths provided for batch STEP processing."}

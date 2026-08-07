@@ -9,7 +9,7 @@ import os
 import numpy as np
 import shapely.geometry as sg
 from shapely.ops import polygonize, unary_union
-from .bend_math import calculate_outside_setback, DEFAULT_ETCH_MARKER_LENGTH_MM
+from .bend_math import calculate_outside_setback, DEFAULT_ETCH_MARKER_LENGTH_MM, DEFAULT_BEND_STYLE, DEFAULT_ETCH_MARKER_POSITION
 
 def get_edge_points(edge, steps=30):
     """
@@ -34,7 +34,7 @@ def get_edge_points(edge, steps=30):
         pts.append((p.X(), p.Y()))
     return pts
 
-def generate_bend_ticks(bend_lines, cut_edges=None, tick_length=4.5, style="tick", position="interior"):
+def generate_bend_ticks(bend_lines, cut_edges=None, tick_length=DEFAULT_ETCH_MARKER_LENGTH_MM, style=DEFAULT_BEND_STYLE, position=DEFAULT_ETCH_MARKER_POSITION):
     """
     Generates etch tick markers along bend lines.
     - position == "interior":
@@ -61,7 +61,7 @@ def generate_bend_ticks(bend_lines, cut_edges=None, tick_length=4.5, style="tick
             direction = bend.get("direction", "UP")
 
             if style == "tick":
-                pos = str(position or "interior").lower()
+                pos = str(position or DEFAULT_ETCH_MARKER_POSITION).lower()
                 if pos in ("boundary", "end", "corner", "outer"):
                     effective_tick_len = min(tick_length, length / 3.0)
                     t1_start = s
@@ -973,10 +973,10 @@ def simplify_bend_double_angles(poly, tolerance=0.8, bend_lines=None, relief_edg
 
 def export_to_dxf_and_svg(
     flat_shape, bend_lines, dxf_path: str, svg_path: str = None,
-    exclude_bend_lines: bool = False, bend_line_style: str = "tick",
+    exclude_bend_lines: bool = False, bend_line_style: str = DEFAULT_BEND_STYLE,
     minimal_dimple_holes: bool = True, other_features: list = None,
     down_features: list = None, up_features: list = None,
-    etch_marker_position: str = "interior", etch_marker_length: float = DEFAULT_ETCH_MARKER_LENGTH_MM,
+    etch_marker_position: str = DEFAULT_ETCH_MARKER_POSITION, etch_marker_length: float = DEFAULT_ETCH_MARKER_LENGTH_MM,
     kfactor: float = 0.44
 ):
     """

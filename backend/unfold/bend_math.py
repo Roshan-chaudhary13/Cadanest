@@ -41,6 +41,12 @@ DEFAULT_THICKNESS_MM = 2.0
 # Default etch/tick mark length (mm) for bend-line indicators in DXF/SVG export.
 DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5
 
+# Default bend-line rendering style ("tick" = etch tick marks, "dashed"/"CENTER2" = centerline).
+DEFAULT_BEND_STYLE = "tick"
+
+# Default etch/tick marker placement relative to the bend line.
+DEFAULT_ETCH_MARKER_POSITION = "interior"
+
 
 def y_factor_to_k_factor(y: float) -> float:
     """Converts PTC Creo Y-Factor to K-Factor: K = Y * (2 / pi)"""

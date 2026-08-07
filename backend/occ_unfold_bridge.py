@@ -18,7 +18,12 @@ try:
     if _here not in sys.path:
         sys.path.insert(0, _here)
     from unfold.bend_math import get_k_factor as _get_k_factor
-    from unfold.bend_math import DEFAULT_THICKNESS_MM, DEFAULT_ETCH_MARKER_LENGTH_MM
+    from unfold.bend_math import (
+        DEFAULT_THICKNESS_MM,
+        DEFAULT_ETCH_MARKER_LENGTH_MM,
+        DEFAULT_BEND_STYLE,
+        DEFAULT_ETCH_MARKER_POSITION,
+    )
 except Exception:
     def _get_k_factor(material: str = "steel") -> float:  # type: ignore[misc]
         """Fallback if bend_math unavailable at import time."""
@@ -28,6 +33,8 @@ except Exception:
         return _K.get(key, _K["default"])
     DEFAULT_THICKNESS_MM = 2.0
     DEFAULT_ETCH_MARKER_LENGTH_MM = 4.5
+    DEFAULT_BEND_STYLE = "tick"
+    DEFAULT_ETCH_MARKER_POSITION = "interior"
 
 def _add_occ_paths():
     candidates = [
@@ -436,7 +443,7 @@ def auto_discover_base_faces(shape, faces, classification, thickness=None):
 
 
 
-def unfold_with_occ(step_path, kfactor, dxf_path, svg_path, base_face_name=None, exclude_bend_lines=False, bend_line_style="tick", mirror=False, minimal_dimple_holes=True, bend_radius=None, etch_marker_position="interior", etch_marker_length=DEFAULT_ETCH_MARKER_LENGTH_MM):
+def unfold_with_occ(step_path, kfactor, dxf_path, svg_path, base_face_name=None, exclude_bend_lines=False, bend_line_style=DEFAULT_BEND_STYLE, mirror=False, minimal_dimple_holes=True, bend_radius=None, etch_marker_position=DEFAULT_ETCH_MARKER_POSITION, etch_marker_length=DEFAULT_ETCH_MARKER_LENGTH_MM):
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)
@@ -806,7 +813,7 @@ if __name__ == "__main__":
         svg_out = sys.argv[5]
         b_face = sys.argv[6] if len(sys.argv) > 6 else None
         ex_bend = len(sys.argv) > 7 and sys.argv[7].lower() == "true"
-        b_style = sys.argv[8] if len(sys.argv) > 8 else "tick"
+        b_style = sys.argv[8] if len(sys.argv) > 8 else DEFAULT_BEND_STYLE
         mir = len(sys.argv) > 9 and sys.argv[9].lower() == "true"
         res = unfold_with_occ(step, k_fact, dxf_out, svg_out, b_face, ex_bend, b_style, mir)
         print(json.dumps(res))
