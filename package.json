@@ -2,11 +2,12 @@
   "name": "cadanest",
   "version": "1.0.0",
   "description": "3D Sheet Metal Unfolding and Nesting Desktop App",
+  "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "electron": "tsc -p tsconfig.electron.json && electron .",
-    "build": "tsc && vite build && tsc -p tsconfig.electron.json",
+    "electron": "tsc -p tsconfig.electron.json && node -e \"fs.copyFileSync('src-electron/preload.cjs','dist-electron/preload.cjs')\" && electron .",
+    "build": "tsc && vite build && tsc -p tsconfig.electron.json && node -e \"fs.copyFileSync('src-electron/preload.cjs','dist-electron/preload.cjs')\"",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -14,7 +15,8 @@
     "lucide-react": "^0.435.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "three": "^0.185.1"
+    "three": "^0.185.1",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",

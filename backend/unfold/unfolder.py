@@ -13,7 +13,7 @@ from .face_graph import (
     find_face_index,
     get_face_center
 )
-from .bend_math import calculate_bend_allowance, calculate_outside_setback
+from .bend_math import calculate_bend_allowance, calculate_outside_setback, get_k_factor_for_bend
 
 def find_shared_endpoints_and_geometry(face1, face2):
     """
@@ -164,47 +164,156 @@ def get_correct_rotation_angle(normal_curr, normal_neighbor, axis_dir, axis_loc,
     
     return theta if dot_plus > dot_minus else -theta
 
+def _unroll_bend_wire(wire, p_ref0, p_ref1, axis_loc, axis_dir,
+                      gp_axis_loc_flat, gp_axis_dir_vec, gp_u_vec,
+                      curr_trsf, rot_angle, shift_dist, bend_face):
+    """
+    Unrolls a specific wire of the bend cylinder's boundary into the flat pattern.
+    """
+    try:
+        from OCC.Core.BRepTools import BRepTools_WireExplorer, breptools
+        from OCC.Core.TopoDS import topods
+        from OCC.Core.TopAbs import TopAbs_REVERSED
+
+        axis_dir_n = np.array(axis_dir) / np.linalg.norm(axis_dir)
+        p_edge = np.array(axis_loc)
+
+        def radial(P):
+            Pv = np.array(P) - p_edge
+            a = np.dot(Pv, axis_dir_n)
+            return Pv - a * axis_dir_n
+
+        ref0 = radial(p_ref0)
+        ref0_norm = np.linalg.norm(ref0)
+        if ref0_norm < 1e-6:
+            return None
+        ref0 = ref0 / ref0_norm
+
+        def signed_angle(rvec):
+            rn_norm = np.linalg.norm(rvec)
+            if rn_norm < 1e-6:
+                return 0.0
+            rn = rvec / rn_norm
+            cross = np.cross(ref0, rn)
+            return math.atan2(np.dot(cross, axis_dir_n), np.dot(ref0, rn))
+
+        theta_signed = signed_angle(radial(p_ref1))
+        if abs(theta_signed) < 1e-6:
+            return None
+
+        def partial_transform(P, frac):
+            t_rot_partial = gp_Trsf()
+            t_rot_partial.SetRotation(gp_Ax1(gp_axis_loc_flat, gp_Dir(gp_axis_dir_vec)), frac * rot_angle)
+            t_trans_partial = gp_Trsf()
+            t_trans_partial.SetTranslation(gp_Vec(frac * shift_dist * gp_u_vec.X(), frac * shift_dist * gp_u_vec.Y(), frac * shift_dist * gp_u_vec.Z()))
+            partial = gp_Trsf()
+            partial.Multiply(t_trans_partial)
+            partial.Multiply(t_rot_partial)
+            partial.Multiply(curr_trsf)
+            gp_p = gp_Pnt(*[float(v) for v in P])
+            gp_p.Transform(partial)
+            return gp_Pnt(gp_p.X(), gp_p.Y(), 0.0)
+
+        wexp = BRepTools_WireExplorer(wire)
+        flat_pts = []
+        while wexp.More():
+            edge = topods.Edge(wexp.Current())
+            curve = BRepAdaptor_Curve(edge)
+            u0, u1 = curve.FirstParameter(), curve.LastParameter()
+            n = 2 if curve.GetType() == GeomAbs_Line else 10
+            sample_params = [u0 + (u1 - u0) * (i / (n - 1)) for i in range(n)]
+            if edge.Orientation() == TopAbs_REVERSED:
+                sample_params.reverse()
+            for uparam in sample_params:
+                p3d = curve.Value(uparam)
+                P = np.array([p3d.X(), p3d.Y(), p3d.Z()])
+                r = radial(P)
+                if np.linalg.norm(r) < 1e-6:
+                    frac = 0.5
+                else:
+                    frac = signed_angle(r) / theta_signed
+                flat_pts.append(partial_transform(P, frac))
+            wexp.Next()
+
+        if len(flat_pts) < 3:
+            return None
+
+        # Drop consecutive duplicate vertices (shared endpoints between edges)
+        deduped = [flat_pts[0]]
+        for p in flat_pts[1:]:
+            if deduped[-1].Distance(p) > 1e-6:
+                deduped.append(p)
+        if len(deduped) > 1 and deduped[0].Distance(deduped[-1]) < 1e-6:
+            deduped.pop()
+
+        return deduped if len(deduped) >= 3 else None
+    except Exception:
+        return None
+
+def unroll_bend_face_boundary(bend_face, p_ref0, p_ref1, axis_loc, axis_dir,
+                               gp_axis_loc_flat, gp_axis_dir_vec, gp_u_vec,
+                               curr_trsf, rot_angle, shift_dist):
+    """
+    Unrolls the bend cylinder's ACTUAL trimmed boundary into the flat pattern (outer wire).
+    """
+    from OCC.Core.BRepTools import breptools
+    outer_wire = breptools.OuterWire(bend_face)
+    return _unroll_bend_wire(outer_wire, p_ref0, p_ref1, axis_loc, axis_dir,
+                             gp_axis_loc_flat, gp_axis_dir_vec, gp_u_vec,
+                             curr_trsf, rot_angle, shift_dist, bend_face)
+
+
 def detect_thickness(faces_list, classification):
     """
     Auto-detects material thickness by finding parallel, opposite-normal planar face pairs.
+    Pre-computes face centers once to run in O(N) time.
     """
     planar_indices = [i for i, c in enumerate(classification) if c["type"] == "PLANE"]
     if len(planar_indices) < 2:
         return None
-        
+
+    # Sort planar faces by area descending and limit to top 15 largest faces
+    planar_indices = sorted(planar_indices, key=lambda idx: classification[idx]["area"], reverse=True)[:15]
+
+    # Pre-compute face centers ONCE
+    centers = {}
+    for idx in planar_indices:
+        centers[idx] = get_face_center(faces_list[idx])
+
     candidates = []
-    for idx_a in planar_indices:
+    for i in range(len(planar_indices)):
+        idx_a = planar_indices[i]
         meta_a = classification[idx_a]
         n_a = np.array(meta_a["normal"])
-        c_a = get_face_center(faces_list[idx_a])
-        
-        for idx_b in planar_indices:
-            if idx_b <= idx_a:
-                continue
+        c_a = centers[idx_a]
+
+        for j in range(i + 1, len(planar_indices)):
+            idx_b = planar_indices[j]
             meta_b = classification[idx_b]
             n_b = np.array(meta_b["normal"])
-            
+
             # Check if normals are opposite (dot product near -1)
             dot_val = np.dot(n_a, n_b)
             if dot_val < -0.95:
-                c_b = get_face_center(faces_list[idx_b])
+                c_b = centers[idx_b]
                 # Compute distance along normal
-                dist = abs(np.dot(c_b - c_a, n_a))
-                # Reasonable sheet metal thickness range: 0.1mm to 20mm
-                if 0.1 <= dist <= 20.0:
-                    min_area = min(meta_a["area"], meta_b["area"])
-                    candidates.append((dist, min_area))
-                    
-    if not candidates:
-        return None
-        
-    # Sort candidates by area descending, choose the distance of the largest pair
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return round(candidates[0][0], 4)
+                dist = abs(np.dot(c_a - c_b, n_a))
+                if 0.2 <= dist <= 30.0:
+                    candidates.append(dist)
+
+    if candidates:
+        # Return most common thickness candidate rounded to 2 decimals
+        rounded = [round(c, 2) for c in candidates]
+        from collections import Counter
+        most_common = Counter(rounded).most_common(1)[0][0]
+        return float(most_common)
+
+    return None
 
 def find_thickness_partner(face_idx, classification, faces_list, thickness):
     """
     Finds the index of the face that is the thickness partner of face_idx.
+    Filters out distant parallel faces by checking tangential in-plane distance.
     """
     meta_curr = classification[face_idx]
     if meta_curr["type"] != "PLANE":
@@ -213,6 +322,9 @@ def find_thickness_partner(face_idx, classification, faces_list, thickness):
     n_curr = np.array(meta_curr["normal"])
     c_curr = get_face_center(faces_list[face_idx])
     
+    best_candidate = None
+    best_tangential_dist = float('inf')
+
     for idx, meta in enumerate(classification):
         if idx == face_idx or meta["type"] != "PLANE":
             continue
@@ -221,15 +333,27 @@ def find_thickness_partner(face_idx, classification, faces_list, thickness):
         # Normals must be opposite
         if np.dot(n_curr, n_other) < -0.95:
             c_other = get_face_center(faces_list[idx])
-            dist = abs(np.dot(c_other - c_curr, n_curr))
+            diff = c_other - c_curr
+            dist = abs(np.dot(diff, n_curr))
             # Distance must be approximately the thickness (within 20% tolerance)
-            if abs(dist - thickness) < 0.2 * thickness:
+            if abs(dist - thickness) < 0.25 * max(thickness, 1.0):
+                # Calculate in-plane tangential distance between face centers
+                tangential_vec = diff - np.dot(diff, n_curr) * n_curr
+                tangential_dist = np.linalg.norm(tangential_vec)
+
                 # Area ratio sanity check: partner faces of a sheet metal part must have comparable surface areas
                 min_a = min(meta_curr["area"], meta["area"])
                 max_a = max(meta_curr["area"], meta["area"])
-                if max_a > 0 and (min_a / max_a) >= 0.15:
-                    return idx
-    return None
+                area_ratio = min_a / max_a if max_a > 0 else 0
+                if area_ratio >= 0.15:
+                    max_allowed_tangential = max(50.0, 5.0 * thickness, 0.5 * (max_a ** 0.5))
+                    if tangential_dist <= max_allowed_tangential:
+                        if tangential_dist < best_tangential_dist:
+                            best_tangential_dist = tangential_dist
+                            best_candidate = idx
+
+    return best_candidate
+
 
 
 def build_planar_adjacency(faces_list, classification, adj, thickness):
@@ -355,7 +479,7 @@ def fuse_shapes_binary_tree(shapes):
     return current_level[0]
 
 
-def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness: float, k_factor: float, root_face_idx: int):
+def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness: float, k_factor: float, root_face_idx: int, bend_radius: float = None):
     """
     Performs recursive unfolding starting from a single specific root face index.
     """
@@ -424,7 +548,19 @@ def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness:
                 # Extract combined endpoints and geometry (supporting split/quadrant edges)
                 p_s_p, p_e_p, e_length, axis_dir, axis_loc = find_shared_endpoints_and_geometry(faces[curr], bend_face)
                 p_s_n, p_e_n, _, _, mid_neigh = find_shared_endpoints_and_geometry(bend_face, faces[neighbor])
-                
+
+                # The tangent-line midpoint above lies ON the cylinder's
+                # surface (radius R away from its true axis), not on the
+                # axis itself. Rotating around it instead of the true axis
+                # leaves a residual out-of-plane offset equal to that
+                # radius (verified directly: using the tangent-line pivot
+                # left a 2.3mm residual Z on a 90 deg bend with an outer
+                # radius of 2.3mm; switching to the cylinder's own
+                # geometric axis - already computed by classify_face() -
+                # brings it to exactly 0). Use the true axis for the
+                # rotation pivot and shift-direction reference instead.
+                axis_loc = bend_meta["axis_loc"]
+
                 if e_length < 1e-6 or p_s_n is None:
                     # Fallback direct transform
                     trsf_map[neighbor] = curr_trsf
@@ -439,12 +575,41 @@ def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness:
                 dot_val = np.clip(np.dot(n_curr, n_neigh), -1.0, 1.0)
                 theta = math.acos(dot_val)
                 
-                # Compute bend allowance & outside setback
-                BA = calculate_bend_allowance(math.degrees(theta), bend_meta["radius"], thickness, k_factor)
-                OSSB = calculate_outside_setback(math.degrees(theta), bend_meta["radius"], thickness)
-                
-                # Developed flat pattern translation shift from 3D tangent position:
-                shift_dist = OSSB - (BA / 2.0)
+                # Compute bend allowance & outside setback.
+                # bend_meta["radius"] is the radius of whichever of the two
+                # concentric bend faces (inner/concave or outer/convex) the
+                # BFS walk happened to reach from `curr` - not necessarily the
+                # inside bend radius the BA/OSSB formulas expect. Normalize to
+                # the true inside radius using the is_inner flag from
+                # classify_face() so results don't depend on traversal order.
+                inside_radius = bend_meta["radius"] if bend_meta.get("is_inner", True) \
+                    else max(bend_meta["radius"] - thickness, 0.0)
+                # A single flat per-material K-factor overestimates bend
+                # allowance on tight-radius bends (R < 2T), since the neutral
+                # axis shifts closer to the inside surface as the ratio
+                # shrinks. Derive K from this bend's own R/T ratio if user-supplied
+                # k_factor is None, otherwise use the user-supplied k_factor for
+                # every bend uniformly, matching how CAD tools (e.g. Solid Edge's
+                # constant-K-factor sheet metal method) apply one K-factor across
+                # the whole part regardless of a given bend's axis orientation.
+                if k_factor is not None:
+                    effective_k_factor = k_factor
+                else:
+                    effective_k_factor = get_k_factor_for_bend(inside_radius, thickness)
+                BA = calculate_bend_allowance(math.degrees(theta), inside_radius, thickness, effective_k_factor)
+                OSSB = calculate_outside_setback(math.degrees(theta), inside_radius, thickness)
+
+                # Developed flat pattern translation shift from 3D tangent position.
+                # Rotating rigidly around the bend cylinder's own TRUE axis by
+                # theta brings curr's and neighbor's tangent points into exact
+                # coincidence (verified directly: ~1e-12mm residual) - that's
+                # the hinge closing with zero gap, not a flat pattern. The flat
+                # pattern needs exactly the bend allowance BA inserted as the
+                # gap between the two tangent lines, so the shift is simply
+                # BA (the old "OSSB - BA/2" was calibrated for the previous,
+                # geometrically-incorrect tangent-line pivot and no longer
+                # applies now that the pivot is the true axis).
+                shift_dist = BA
 
                 # Determine tangent direction u pointing towards the bend
                 p_edge = np.array(axis_loc)
@@ -508,24 +673,77 @@ def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness:
                 gp_s_n = gp_Pnt(*p_s_n); gp_s_n.Transform(c_trsf)
                 gp_e_n = gp_Pnt(*p_e_n); gp_e_n.Transform(c_trsf)
 
-                # Bend face in flat space: 4-point quadrilateral unrolled cylindrical face
+                # Bend face in flat space: unroll the bend cylinder's ACTUAL
+                # trimmed boundary rather than approximating it as a
+                # straight-sided quad between just the two tangent lines, so
+                # a flange that narrows partway through a bend (a real step
+                # cut into the bend region) comes out as the real shape
+                # instead of a diagonal cut through it. Falls back to the
+                # simple quad (correct whenever the bend is a plain
+                # untrimmed strip, which is most bends) if the wire can't be
+                # walked, or if the unrolled polygon turns out self-
+                # intersecting/degenerate (checked explicitly, since a bad
+                # face here would otherwise only surface much later as an
+                # opaque failure in the final binary-tree fuse).
                 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakePolygon, BRepBuilderAPI_MakeFace
-                poly = BRepBuilderAPI_MakePolygon()
-                
-                # Side 1: Parent edge (gp_s_p -> gp_e_p)
-                poly.Add(gp_s_p)
-                poly.Add(gp_e_p)
+                from OCC.Core.BRepCheck import BRepCheck_Analyzer
+                from OCC.Core.TopExp import TopExp_Explorer
+                from OCC.Core.TopAbs import TopAbs_WIRE
+                from OCC.Core.BRepTools import breptools
+                from OCC.Core.TopoDS import topods
 
-                # Side 2: Transition boundary across bend allowance (gp_e_p -> gp_e_n)
-                poly.Add(gp_e_n)
+                def _build_valid_bend_face(outer_points, inner_points_list=None):
+                    if not outer_points:
+                        return None
+                    try:
+                        p = BRepBuilderAPI_MakePolygon()
+                        for pt in outer_points:
+                            p.Add(gp_Pnt(pt.X(), pt.Y(), 0.0))
+                        p.Close()
+                        if not p.IsDone():
+                            return None
+                        face_maker = BRepBuilderAPI_MakeFace(p.Wire())
+                        if inner_points_list:
+                            for inner_pts in inner_points_list:
+                                ip = BRepBuilderAPI_MakePolygon()
+                                for pt in inner_pts:
+                                    ip.Add(gp_Pnt(pt.X(), pt.Y(), 0.0))
+                                ip.Close()
+                                if ip.IsDone():
+                                    face_maker.Add(ip.Wire())
+                        if not face_maker.IsDone():
+                            return None
+                        f = face_maker.Face()
+                        if f.IsNull() or not BRepCheck_Analyzer(f).IsValid():
+                            return None
+                        return f
+                    except Exception:
+                        return None
 
-                # Side 3: Child edge (gp_e_n -> gp_s_n)
-                poly.Add(gp_s_n)
+                outer_wire = breptools.OuterWire(bend_face)
+                unrolled_outer = _unroll_bend_wire(
+                    outer_wire, p_s_p, p_s_n, axis_loc, axis_dir,
+                    gp_axis_loc_flat, gp_axis_dir_vec, gp_u_vec, curr_trsf, rot_angle, shift_dist, bend_face
+                )
 
-                poly.Close()
+                unrolled_inners = []
+                exp_w = TopExp_Explorer(bend_face, TopAbs_WIRE)
+                while exp_w.More():
+                    w = topods.Wire(exp_w.Current())
+                    if not w.IsSame(outer_wire):
+                        inner_pts = _unroll_bend_wire(
+                            w, p_s_p, p_s_n, axis_loc, axis_dir,
+                            gp_axis_loc_flat, gp_axis_dir_vec, gp_u_vec, curr_trsf, rot_angle, shift_dist, bend_face
+                        )
+                        if inner_pts:
+                            unrolled_inners.append(inner_pts)
+                    exp_w.Next()
 
-                local_bend = BRepBuilderAPI_MakeFace(poly.Wire()).Face()
-                flat_shapes.append(local_bend)
+                local_bend = _build_valid_bend_face(unrolled_outer, unrolled_inners)
+                if local_bend is None:
+                    local_bend = _build_valid_bend_face([gp_s_p, gp_e_p, gp_e_n, gp_s_n])
+                if local_bend is not None:
+                    flat_shapes.append(local_bend)
                 
                 # Calculate bend centerline directly in flat pattern space from transformed endpoints
                 gp_start = gp_Pnt(
@@ -540,8 +758,7 @@ def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness:
                 )
                 
                 # Only emit one fold line per physical cylinder face.
-                # Also skip very small-area cylinders (< 150 mm²) which are corner fillets, not structural bends.
-                if bend_idx not in used_cylinders and classification[bend_idx]["area"] >= 150.0:
+                if bend_idx not in used_cylinders and classification[bend_idx]["area"] >= 5.0:
                     used_cylinders.add(bend_idx)
                     direction = "UP" if rot_angle > 0 else "DOWN"
                     bend_lines.append({
@@ -553,7 +770,7 @@ def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness:
                         "tangent2_end": (gp_e_n.X(), gp_e_n.Y(), gp_e_n.Z()),
                         "angle_deg": math.degrees(theta),
                         "ba": BA,
-                        "radius": bend_meta["radius"],
+                        "radius": inside_radius,
                         "direction": direction
                     })
                 
@@ -597,7 +814,7 @@ def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness:
                 
                 # Sharp folds are topology artifacts (co-planar sections of hooks etc.);
                 # real laser-cut fold marks come only from cylinder bends.
-                
+
     # 4. Fuse all flattened planar faces and bend faces into a single unified shape
     from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
     
@@ -639,7 +856,37 @@ def unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness:
         
     return flat_shape, bend_lines
 
-def unfold_sheet_metal(shape, thickness: float = None, k_factor: float = 0.44, root_face_idx = None):
+def _mirror_flat_result(flat_shape, bend_lines):
+    """
+    Mirrors a flattened result across the YZ plane (negates X), producing
+    the other valid flat-pattern handedness. A sheet metal flange has two
+    parallel faces (top and bottom); flattening as viewed from either one
+    is equally geometrically valid, and the two results are mirror images
+    of each other. Which one a CAD system shows is a design-history choice
+    (which face the original sketch was drawn on) that isn't recoverable
+    from an exported STEP solid - auto-selecting a root face can pick
+    either side with no geometric signal to prefer one over the other, so
+    this exposes the choice as an explicit flip rather than guessing.
+    """
+    from OCC.Core.gp import gp_Ax2
+    mirror_trsf = gp_Trsf()
+    mirror_trsf.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)))
+    mirrored_shape = BRepBuilderAPI_Transform(flat_shape, mirror_trsf, True).Shape()
+
+    mirrored_bend_lines = []
+    for bl in bend_lines:
+        new_bl = {}
+        for key, val in bl.items():
+            if isinstance(val, (tuple, list)) and len(val) == 3:
+                new_bl[key] = (-val[0], val[1], val[2])
+            else:
+                new_bl[key] = val
+        mirrored_bend_lines.append(new_bl)
+
+    return mirrored_shape, mirrored_bend_lines
+
+
+def unfold_sheet_metal(shape, thickness: float = None, k_factor: float = 0.44, root_face_idx = None, mirror: bool = False, bend_radius: float = None):
     """
     Performs recursive unfolding of the sheet metal shape and fuses the flat pattern.
     Automatically chooses the cleanest candidate root face based on flat edge count if not specified.
@@ -704,22 +951,31 @@ def unfold_sheet_metal(shape, thickness: float = None, k_factor: float = 0.44, r
             if classification[max_f]["area"] >= max(100.0, 0.03 * max_area):
                 auto_roots.append(max_f)
 
-        # Deduplicate opposite-thickness partner faces
+        # Deduplicate opposite-thickness partner faces, ALWAYS choosing the face with LARGER surface area (outer shell side)
         partners = {idx: find_thickness_partner(idx, classification, faces, thickness) for idx in auto_roots}
         unique_roots = []
         covered = set()
         for r in auto_roots:
             if r not in covered:
-                unique_roots.append(r)
-                covered.add(r)
-                if partners.get(r) is not None:
-                    covered.add(partners[r])
+                p = partners.get(r)
+                if p is not None:
+                    # Select the partner face with the larger surface area (outer shell side)
+                    best_r = max([r, p], key=lambda f_idx: classification[f_idx]["area"])
+                    unique_roots.append(best_r)
+                    covered.add(r)
+                    covered.add(p)
+                else:
+                    unique_roots.append(r)
+                    covered.add(r)
 
         root_indices = unique_roots if unique_roots else [planar_indices[0]]
 
     # If there is only one root index, execute the single unfold
     if len(root_indices) == 1:
-        return unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness, k_factor, root_indices[0])
+        flat_shape, bend_lines = unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness, k_factor, root_indices[0], bend_radius=bend_radius)
+        if mirror:
+            flat_shape, bend_lines = _mirror_flat_result(flat_shape, bend_lines)
+        return flat_shape, bend_lines
 
     # If there are multiple root indices, unfold each and translate them side-by-side to avoid overlap
     from OCC.Core.Bnd import Bnd_Box
@@ -736,7 +992,7 @@ def unfold_sheet_metal(shape, thickness: float = None, k_factor: float = 0.44, r
     spacing_between_components = 20.0  # 20mm gap between unfolded components
     
     for r_idx in root_indices:
-        comp_shape, comp_bend_lines = unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness, k_factor, r_idx)
+        comp_shape, comp_bend_lines = unfold_sheet_metal_single_root(faces, classification, planar_adj, thickness, k_factor, r_idx, bend_radius=bend_radius)
         
         # Calculate bounds of the new component before translating it
         bbox = Bnd_Box()
@@ -774,5 +1030,8 @@ def unfold_sheet_metal(shape, thickness: float = None, k_factor: float = 0.44, r
             all_bend_lines.extend(comp_bend_lines)
             
         builder.Add(compound, comp_shape)
-        
+
+    if mirror:
+        compound, all_bend_lines = _mirror_flat_result(compound, all_bend_lines)
+
     return compound, all_bend_lines

@@ -36,7 +36,7 @@ def process_single_step_part(args):
     res["name"] = base_name
     return res
 
-def run_batch_step_processing(file_paths, output_dir, kfactor=0.40, bend_style="tick", max_workers=None):
+def run_batch_step_processing(file_paths, output_dir, kfactor=0.44, bend_style="tick", max_workers=None):
     """
     Processes multiple STEP files in parallel, classifies them by thickness,
     and organizes generated 2D manufacturing drawings into output folders.

@@ -17,7 +17,9 @@ import {
   Maximize2
 } from 'lucide-react';
 import { FlatPreviewer } from './components/FlatPreviewer';
-import { Model3DViewer } from './components/Model3DViewer';
+import { Model3DViewer, getMaterialColorCss } from './components/Model3DViewer';
+import { JobGroupTab } from './components/JobGroupTab';
+import { STANDARD_MATERIALS, CAD_PRESETS_CATALOG, PartItem, FlatElementItem } from './store/useCadanestStore';
 
 declare global {
   interface Window {
@@ -25,19 +27,29 @@ declare global {
       selectFile: () => Promise<string[] | null>;
       getStlData: (filePath: string) => Promise<ArrayBuffer | null>;
       cancelProcess: () => Promise<boolean>;
-      runAnalyze: (stepPath: string) => Promise<any>;
+      runAnalyze: (stepPath: string, originalPath?: string) => Promise<any>;
+      runAnalyzeBatch: (items: Array<{ stepPath: string; originalPath?: string }>) => Promise<any>;
       parseDxf: (dxfPath: string) => Promise<any>;
       parseCadAssembly: (filePath: string) => Promise<any>;
-      runUnfold: (args: { stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string }) => Promise<any>;
+      parseCadAssemblyBatch: (filePath: string) => Promise<any>;
+      runUnfold: (args: { stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string; mirror?: boolean; exportMinimalDimpleHoles?: boolean; bendRadius?: number; etchMarkerPosition?: string; etchMarkerLength?: number }) => Promise<any>;
+      runUnfoldBatch: (items: Array<{ stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string; mirror?: boolean; exportMinimalDimpleHoles?: boolean; bendRadius?: number; etchMarkerPosition?: string; etchMarkerLength?: number }>) => Promise<any>;
       runNesting: (args: {
         sheetWidth: number;
         sheetHeight: number;
         spacing: number;
         margin: number;
+        sheetCutoutWidth?: number;
+        sheetCutoutHeight?: number;
+        sheetProfile?: string;
         autoFill?: boolean;
         rotations?: number[];
         exportFilename?: string;
         excludeBendLines?: boolean;
+        bendStyle?: string;
+        exportMinimalDimpleHoles?: boolean;
+        etchMarkerPosition?: string;
+        etchMarkerLength?: number;
         parts: Array<{
           id: string;
           stepPath: string;
@@ -45,63 +57,22 @@ declare global {
           quantity: number;
           kfactor: number;
           baseFace?: string;
+          bendRadius?: number;
+          etchMarkerPosition?: string;
+          etchMarkerLength?: number;
         }>;
       }) => Promise<any>;
+      calibrateKFactor: (args: { targetFlatLength: number; straightSum: number; bendAngles: number[]; bendRadii: number[]; thickness: number }) => Promise<{ status: string; kfactor?: number; error?: string }>;
       openFile: (filePath: string) => Promise<boolean>;
       saveFileAs: (args: { sourcePath: string; defaultFilename: string }) => Promise<{ status: string; filePath?: string; error?: string }>;
     };
   }
 }
 
-interface FaceMeta {
-  name: string;
-  type: string;
-  area: number;
-}
+// PartItem and FlatElementItem are defined in ./store/useCadanestStore and imported above.
+// Re-export PartItem for any external consumers that import it from App.
+export type { PartItem };
 
-interface FlatElementItem {
-  id: string;
-  partId: string;
-  name: string; // e.g. "Face27"
-  parentName: string; // e.g. "STAND ASSEMBLY.STEP"
-  baseFace: string;
-  dxfPath?: string | null;
-  svgContent?: string | null;
-  isUnfolded?: boolean;
-  unfoldedKfactor?: number;
-  unfoldedBaseFace?: string | null;
-  quantity: number;
-  active?: boolean;
-  group?: 'A' | 'B' | null;
-}
-
-interface PartItem {
-  id: string;
-  name: string;
-  stepPath: string;
-  quantity: number;
-  kfactor: number;
-  baseFace: string | null;
-  thickness: number;
-  material?: string;
-  totalFaces: number;
-  planarFaces: number;
-  faces: FaceMeta[];
-  svgPreview: string | null;
-  stlPath: string | null;
-  dimensions: { x: number; y: number; z: number };
-  volume: number;
-  area: number;
-  // Unfold output fields
-  svgContent?: string | null;
-  dxfPath?: string | null;
-  isUnfolded?: boolean;
-  unfoldedKfactor?: number;
-  unfoldedBaseFace?: string | null;
-  active?: boolean; // Toggled by user to exclude/include in nesting
-  isDxfOnly?: boolean; // True if directly imported from DXF skipping 3D flattening
-  flatElements?: FlatElementItem[];
-}
 
 // Reusable Quantity Control with direct numeric input, +/- buttons, and optional Auto toggle
 const QuantityControl: React.FC<{
@@ -190,11 +161,26 @@ const QuantityControl: React.FC<{
   );
 };
 
+// Derived from STANDARD_MATERIALS (single source of truth) plus a couple of
+// alias spellings that aren't distinct STANDARD_MATERIALS entries.
+const MATERIAL_K_PRESETS: Record<string, number> = {
+  ...Object.fromEntries(STANDARD_MATERIALS.map(m => [m.name, m.kFactor])),
+  'Steel, Structural': STANDARD_MATERIALS.find(m => m.name === 'Mild Steel')!.kFactor,
+  'Aluminum 1060': STANDARD_MATERIALS.find(m => m.name === 'Aluminium 5052')!.kFactor,
+};
+
 export default function App() {
   // Application State
   const [parts, setParts] = useState<PartItem[]>([]);
   const lastNestingParamsRef = useRef<string>('');
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+
+  // K-Factor Calibration Modal State
+  const [showCalibrationModal, setShowCalibrationModal] = useState<boolean>(false);
+  const [targetFlatLengthInput, setTargetFlatLengthInput] = useState<string>('');
+  const [calibratedKResult, setCalibratedKResult] = useState<number | null>(null);
+  const [isCalibrating, setIsCalibrating] = useState<boolean>(false);
+  const [calibrationError, setCalibrationError] = useState<string | null>(null);
   const [combined3D, setCombined3D] = useState<boolean>(false);
   const [selectedFlatElementId, setSelectedFlatElementId] = useState<string | null>(null);
   const [hoveredFaceName, setHoveredFaceName] = useState<string | null>(null);
@@ -245,7 +231,7 @@ export default function App() {
   const [nestingProgress, setNestingProgress] = useState<{ pct: number; msg: string; packed?: number } | null>(null);
   const [consoleLogs, setConsoleLogs] = useState<string[]>(['System initialized. Ready to load models.']);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'import' | 'flatten' | 'nesting'>('import');
+  const [activeTab, setActiveTab] = useState<'import' | 'flatten' | 'jobgroups' | 'nesting'>('import');
   const [nestingInitialized, setNestingInitialized] = useState<boolean>(false);
   const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
@@ -255,6 +241,9 @@ export default function App() {
   const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
   const [exportScope, setExportScope] = useState<'current' | 'all' | 'custom'>('current');
   const [exportSelectedSheetIdx, setExportSelectedSheetIdx] = useState<number>(0);
+  const [selectedMaterialFilter, setSelectedMaterialFilter] = useState<string>('ALL');
+  const [hierarchyMaterialFilter, setHierarchyMaterialFilter] = useState<string>('ALL');
+  const [expandedPartFaces, setExpandedPartFaces] = useState<Record<string, boolean>>({});
   const [customSheetRange, setCustomSheetRange] = useState<string>('1');
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>(() => {
     return (localStorage.getItem('theme-mode') as 'light' | 'dark') || 'dark';
@@ -263,6 +252,7 @@ export default function App() {
   // Antigravity enhancements states
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
   const [showLogsModal, setShowLogsModal] = useState<boolean>(false);
+  const [showAdvancedModal, setShowAdvancedModal] = useState<boolean>(false);
   const [fullScreenView, setFullScreenView] = useState<'3d' | 'flat' | 'nesting' | null>(null);
 
   useEffect(() => {
@@ -310,6 +300,13 @@ export default function App() {
     setSheetDefaultStrategyState(strat);
     localStorage.setItem('cadanest-sheet-strategy', strat);
   };
+  const [showPreFlattenModal, setShowPreFlattenModal] = useState<boolean>(false);
+  const [bendStyle, setBendStyle] = useState<string>('dashed');
+  const [etchMarkerPosition, setEtchMarkerPosition] = useState<'interior' | 'boundary'>('interior');
+  const [etchMarkerLength, setEtchMarkerLength] = useState<number>(4.5);
+  const [exportMinimalDimpleHoles, setExportMinimalDimpleHoles] = useState<boolean>(true);
+  const [allowPartInPart, setAllowPartInPart] = useState<boolean>(true);
+
   const [combinedFlat, setCombinedFlat] = useState<boolean>(false);
   const [flatRotations, setFlatRotations] = useState<{ [elementId: string]: number }>({});
   const [autoQuantityMap, setAutoQuantityMap] = useState<{ [elementId: string]: boolean }>({});
@@ -388,6 +385,149 @@ export default function App() {
   // Currently active selected part helper
   const selectedPart = parts.find(p => p.id === selectedPartId) || null;
 
+  const handleOpenCalibrationModal = (part?: PartItem | null) => {
+    const p = part || selectedPart || parts[0];
+    if (!p) return;
+    const activeFe = p.flatElements?.find(fe => fe.id === selectedFlatElementId) || p.flatElements?.[0];
+    const initialTarget = activeFe?.width || p.dimensions?.x || 200.0;
+    setTargetFlatLengthInput(initialTarget.toFixed(3));
+    setCalibratedKResult(null);
+    setCalibrationError(null);
+    setShowCalibrationModal(true);
+  };
+
+  const handleCalibrateKFactor = async () => {
+    const targetPart = selectedPart || parts[0];
+    if (!targetPart) return;
+
+    const targetLen = parseFloat(targetFlatLengthInput);
+    if (isNaN(targetLen) || targetLen <= 0) {
+      setCalibrationError('Please enter a valid positive target flat dimension (mm).');
+      return;
+    }
+
+    setIsCalibrating(true);
+    setCalibrationError(null);
+
+    try {
+      const summary = targetPart.bendSummary || {
+        bend_count: 0,
+        bend_angles: [],
+        bend_radii: [],
+        straight_sum: targetPart.dimensions?.x || 100,
+        avg_radius: targetPart.bendRadius || 1.0,
+      };
+
+      const angles = summary.bend_angles && summary.bend_angles.length > 0
+        ? summary.bend_angles
+        : Array(summary.bend_count || 1).fill(90.0);
+      const radii = summary.bend_radii && summary.bend_radii.length > 0
+        ? summary.bend_radii
+        : Array(summary.bend_count || 1).fill(summary.avg_radius || 1.0);
+      const straightSum = summary.straight_sum || targetPart.dimensions?.x || 100;
+      const thickness = targetPart.thickness || 1.0;
+
+      const res = await window.electronAPI.calibrateKFactor({
+        targetFlatLength: targetLen,
+        straightSum: straightSum,
+        bendAngles: angles,
+        bendRadii: radii,
+        thickness: thickness,
+      });
+
+      if (res && res.status === 'success' && typeof res.kfactor === 'number') {
+        setCalibratedKResult(res.kfactor);
+        addLog(`🎯 K-Factor reverse-solved: K = ${res.kfactor.toFixed(4)} for target length ${targetLen.toFixed(3)} mm.`);
+      } else {
+        setCalibrationError(res?.error || 'Failed to calculate calibrated K-factor.');
+      }
+    } catch (err: any) {
+      setCalibrationError(err.message || 'Calibration request failed.');
+    } finally {
+      setIsCalibrating(false);
+    }
+  };
+
+  const handleApplyCalibratedKFactor = (saveAsMaterialDefault: boolean = false) => {
+    const targetPart = selectedPart || parts[0];
+    if (!targetPart || calibratedKResult === null) return;
+
+    const newK = calibratedKResult;
+
+    setParts(prev => prev.map(p => {
+      if (p.id === targetPart.id) {
+        return {
+          ...p,
+          kfactor: newK,
+          kFactorMode: 'manual',
+        };
+      }
+      return p;
+    }));
+
+    if (saveAsMaterialDefault && targetPart.materialName) {
+      MATERIAL_K_PRESETS[targetPart.materialName] = newK;
+      addLog(`Saved K = ${newK.toFixed(4)} as default preset for material "${targetPart.materialName}".`);
+    }
+
+    setShowCalibrationModal(false);
+    addLog(`Applied calibrated K-Factor (${newK.toFixed(4)}) to part ${targetPart.name}.`);
+
+    setTimeout(() => {
+      handleRunUnfold();
+    }, 50);
+  };
+
+  const handleSelectKFactorMode = (
+    mode: 'material' | 'adaptive' | 'manual' | 'preset' | 'y_factor' | 'din6935',
+    presetOrValue?: string | number
+  ) => {
+    const targetPart = selectedPart || parts[0];
+    if (!targetPart) return;
+
+    let newK = targetPart.kfactor;
+    let selectedPreset = targetPart.kFactorPreset;
+    let selectedY = targetPart.yFactor;
+    let matName = targetPart.materialName || 'Mild Steel';
+
+    if (mode === 'preset' && typeof presetOrValue === 'string') {
+      const presetOpt = CAD_PRESETS_CATALOG.find(p => p.id === presetOrValue);
+      if (presetOpt) {
+        newK = presetOpt.value;
+        selectedPreset = presetOpt.id;
+      }
+    } else if (mode === 'y_factor') {
+      const yVal = typeof presetOrValue === 'number' ? presetOrValue : (targetPart.yFactor ?? 0.50);
+      selectedY = yVal;
+      newK = yVal * (2.0 / Math.PI); // Convert Y-factor to K-factor: K = Y * (2/pi)
+    } else if (mode === 'din6935') {
+      const r = targetPart.bendSummary?.avg_radius ?? targetPart.bendRadius ?? 1.0;
+      const t = targetPart.thickness || 1.0;
+      const ratio = r / t;
+      newK = ratio >= 5.0 ? 0.500000 : Math.max(0.330000, Math.min(0.500000, 0.330000 + 0.170000 * Math.log10(Math.max(0.01, ratio))));
+    } else if (mode === 'material') {
+      matName = typeof presetOrValue === 'string' ? presetOrValue : (targetPart.materialName || 'Mild Steel');
+      newK = MATERIAL_K_PRESETS[matName] ?? 0.44;
+    } else if (mode === 'adaptive') {
+      const avgR = targetPart.bendSummary?.avg_radius ?? targetPart.bendRadius ?? 1.0;
+      const t = targetPart.thickness || 1.0;
+      newK = avgR < 2.0 * t ? 0.333333 : 0.500000;
+    } else if (mode === 'manual' && typeof presetOrValue === 'number') {
+      newK = Math.max(0.0, Math.min(1.0, presetOrValue));
+    }
+
+    setParts(prev => prev.map(p => p.id === targetPart.id ? {
+      ...p,
+      kFactorMode: mode,
+      kFactorPreset: selectedPreset,
+      yFactor: selectedY,
+      kfactor: newK,
+      materialName: matName
+    } : p));
+
+    addLog(`Updated K-Factor mode to '${mode.toUpperCase()}' (K=${newK.toFixed(6)}) for ${targetPart.name}.`);
+  };
+
   const handleCancelProcess = async () => {
     addLog('Cancelling active operation...');
     await window.electronAPI.cancelProcess();
@@ -423,9 +563,111 @@ export default function App() {
         const name = filePath.split(/[\\/]/).pop() || filePath;
         const ext = filePath.toLowerCase().split('.').pop() || '';
         const isDxf = ext === 'dxf';
-        const isCadAssembly = ['asm', 'psm', 'par', 'sldprt', 'sldasm'].includes(ext);
+        const isAssemblyFile = ext === 'asm';
+        const isCadAssembly = ['psm', 'par', 'sldprt', 'sldasm'].includes(ext);
 
-        if (isCadAssembly) {
+        if (isAssemblyFile) {
+          addLog(`Resolving assembly & converting sheet-metal parts: ${name}...`);
+          const batchResponse = await window.electronAPI.parseCadAssemblyBatch(filePath);
+
+          if (batchResponse.status === 'success' && Array.isArray(batchResponse.parts)) {
+            let successCount = 0;
+            const validPartResults = batchResponse.parts.filter((pr: any) => pr.status === 'success' && pr.step_path);
+
+            const analyzeItems = validPartResults.map((pr: any) => {
+              addLog(`Analyzing geometry for: ${pr.name}...`);
+              return {
+                stepPath: pr.step_path,
+                originalPath: pr.file_path || pr.psm_path,
+                partResult: pr
+              };
+            });
+
+            const batchAnalyzeRes = await window.electronAPI.runAnalyzeBatch(
+              analyzeItems.map((item: any) => ({ stepPath: item.stepPath, originalPath: item.originalPath }))
+            );
+
+            if (batchAnalyzeRes && batchAnalyzeRes.status === 'success' && Array.isArray(batchAnalyzeRes.results)) {
+              for (let i = 0; i < analyzeItems.length; i++) {
+                const item = analyzeItems[i];
+                const partResult = item.partResult;
+                const analyzeResult = batchAnalyzeRes.results[i];
+
+                if (analyzeResult && analyzeResult.status === 'success') {
+                  const partId = Math.random().toString(36).substring(2, 9);
+                  const rawMatName = (partResult.metadata?.material && partResult.metadata.material !== 'Mild Steel' && partResult.metadata.material !== 'binary')
+                    ? partResult.metadata.material
+                    : (analyzeResult.material_name || analyzeResult.material || 'Mild Steel');
+
+                  let stdMat = STANDARD_MATERIALS.find(
+                    (m) => m.name.toLowerCase() === rawMatName.toLowerCase() || m.code.toLowerCase() === rawMatName.toLowerCase()
+                  );
+                  if (!stdMat) {
+                    const lower = rawMatName.toLowerCase();
+                    if (lower.includes('copper') || lower.includes('cu')) stdMat = STANDARD_MATERIALS.find(m => m.code === 'Cu');
+                    else if (lower.includes('alum') || lower.includes('al6') || lower.includes('1060')) stdMat = STANDARD_MATERIALS.find(m => m.code === 'AL6061');
+                    else if (lower.includes('al5')) stdMat = STANDARD_MATERIALS.find(m => m.code === 'AL5052');
+                    else if (lower.includes('struct')) stdMat = STANDARD_MATERIALS.find(m => m.name.includes('Structural'));
+                    else if (lower.includes('stainless') || lower.includes('ss3')) stdMat = STANDARD_MATERIALS.find(m => m.code === 'SS304');
+                    else stdMat = STANDARD_MATERIALS[0];
+                  }
+
+                  const assignedMatName = stdMat?.name || rawMatName;
+                  const assignedMatCode = stdMat?.code || 'MS';
+                  const assignedDensity = stdMat?.density || 7850;
+
+                  const partItem: PartItem = {
+                    id: partId,
+                    name: partResult.name,
+                    stepPath: partResult.step_path,
+                    quantity: 1,
+                    kfactor: partResult.metadata?.kfactor !== undefined ? partResult.metadata.kfactor : (analyzeResult?.kfactor ?? 0.44),
+                    kFactorMode: 'material',
+                    bendSummary: analyzeResult?.bend_summary,
+                    bendRadius: partResult.metadata?.bend_radius || undefined,
+                    mirror: true,
+                    baseFace: analyzeResult.base_face,
+                    thickness: analyzeResult.thickness,
+                    material: assignedMatCode,
+                    materialName: assignedMatName,
+                    density: assignedDensity,
+                    totalFaces: analyzeResult.total_face_count,
+                    planarFaces: analyzeResult.planar_face_count,
+                    faces: analyzeResult.faces,
+                    svgPreview: analyzeResult.svg_preview_content || null,
+                    stlPath: analyzeResult.stl_preview_path || null,
+                    dimensions: analyzeResult.dimensions || { x: 0, y: 0, z: 0 },
+                    volume: analyzeResult.volume || 0,
+                    area: analyzeResult.area || 0,
+                    active: true,
+                    flatElements: analyzeResult.base_face ? analyzeResult.base_face.split(',').map((f: string) => f.trim()).filter(Boolean).map((faceName: string) => ({
+                      id: Math.random().toString(36).substring(2, 9),
+                      partId: partId,
+                      name: `${partResult.name.replace(/\.[^/.]+$/, "")} [${faceName}]`,
+                      parentName: partResult.name,
+                      baseFace: faceName,
+                      quantity: 1,
+                      active: true,
+                      thickness: analyzeResult.thickness,
+                      material: assignedMatName,
+                      group: 'A'
+                    })) : []
+                  };
+                  newParts.push(partItem);
+                  stepCount++;
+                  successCount++;
+                  addLog(`✓ ${partResult.name} imported from assembly (Material: ${assignedMatName}, Thickness: ${analyzeResult.thickness.toFixed(1)}mm).`);
+                } else {
+                  addLog(`Error analyzing ${partResult.name}: ${analyzeResult?.error || 'Unknown error'}`);
+                }
+              }
+            }
+            addLog(`✓ Assembly ${name} processed: ${successCount}/${batchResponse.parts.length} sheet-metal parts imported. Click Flatten to unfold them, then Nesting to pack the sheet.`);
+          } else {
+            setErrorMessage(`Failed to process assembly ${name}: ${batchResponse.error}`);
+            addLog(`Error processing assembly ${name}: ${batchResponse.error}`);
+          }
+        } else if (isCadAssembly) {
           addLog(`Parsing CAD Assembly & Metadata: ${name}...`);
           const response = await window.electronAPI.parseCadAssembly(filePath);
           if (response.status === 'success') {
@@ -440,7 +682,8 @@ export default function App() {
             if (response.step_path) {
               analyzeResult = await window.electronAPI.runAnalyze(response.step_path);
               try {
-                unfoldResult = await window.electronAPI.runUnfold({ stepPath: response.step_path, kfactor: 0.40, bendStyle: 'tick' });
+                const defaultK = meta.kfactor !== undefined ? meta.kfactor : (analyzeResult?.kfactor ?? 0.44);
+                unfoldResult = await window.electronAPI.runUnfold({ stepPath: response.step_path, kfactor: defaultK, bendStyle: bendStyle, mirror: true, bendRadius: meta.bend_radius });
               } catch (e) {
                 console.warn('Auto-unfold on import warning:', e);
               }
@@ -452,7 +695,11 @@ export default function App() {
               name: name,
               stepPath: targetStep,
               quantity: 1,
-              kfactor: 0.40,
+              kfactor: meta.kfactor !== undefined ? meta.kfactor : (analyzeResult?.kfactor ?? 0.44),
+              kFactorMode: 'material',
+              bendSummary: analyzeResult?.bend_summary,
+              bendRadius: meta.bend_radius || undefined,
+              mirror: true,
               baseFace: analyzeResult?.base_face || 'Auto',
               thickness: analyzeResult?.thickness || thickness,
               material: material,
@@ -465,28 +712,42 @@ export default function App() {
               volume: analyzeResult?.volume || 0,
               area: analyzeResult?.area || 0,
               active: true,
-              flatElements: meta.linked_parts && meta.linked_parts.length > 0 ? meta.linked_parts.map((partName: string) => ({
-                id: Math.random().toString(36).substring(2, 9),
-                partId: partId,
-                name: partName,
-                parentName: name,
-                baseFace: 'Auto',
-                quantity: 1,
-                active: true,
-                group: 'A'
-              })) : []
+              flatElements: (meta.linked_parts && meta.linked_parts.length > 0) 
+                ? meta.linked_parts.map((partName: string) => ({
+                    id: Math.random().toString(36).substring(2, 9),
+                    partId: partId,
+                    name: partName,
+                    parentName: name,
+                    baseFace: 'Auto',
+                    quantity: 1,
+                    active: true,
+                    group: 'A'
+                  })) 
+                : [{
+                    id: Math.random().toString(36).substring(2, 9),
+                    partId: partId,
+                    name: name,
+                    parentName: name,
+                    baseFace: analyzeResult?.base_face || 'Auto',
+                    quantity: 1,
+                    active: true,
+                    group: 'A'
+                  }]
             };
             newParts.push(partItem);
-            stepCount++;
-            addLog(`✓ ${name} CAD Assembly imported (Material: ${material}, Thickness: ${thickness}mm). Linked sub-parts: ${meta.linked_parts?.length || 0}`);
-
-            // If sub-parts exist in the same folder, auto-import resolved sub-parts
-            if (meta.linked_part_paths && meta.linked_part_paths.length > 0) {
-              for (const subPath of meta.linked_part_paths) {
-                if (!validPaths.includes(subPath)) {
-                  validPaths.push(subPath);
+            const isAssemblyFile = ext === '.asm' || ext === '.sldasm';
+            if (isAssemblyFile) {
+              addLog(`✓ ${name} CAD Assembly imported (Material: ${material}, Thickness: ${thickness}mm). Linked sub-parts: ${meta.linked_parts?.length || 0}`);
+              // If sub-parts exist in the same folder, auto-import resolved sub-parts for assemblies
+              if (meta.linked_part_paths && meta.linked_part_paths.length > 0) {
+                for (const subPath of meta.linked_part_paths) {
+                  if (!validPaths.includes(subPath)) {
+                    validPaths.push(subPath);
+                  }
                 }
               }
+            } else {
+              addLog(`✓ ${name} Single Part imported (Material: ${material}, Thickness: ${thickness}mm).`);
             }
           } else {
             setErrorMessage(`Failed to parse CAD file ${name}: ${response.error}`);
@@ -503,7 +764,7 @@ export default function App() {
               name: name,
               stepPath: '',
               quantity: 1,
-              kfactor: 0.40,
+              kfactor: 0.44,
               baseFace: 'DXF_Profile',
               thickness: response.thickness || 0,
               totalFaces: 1,
@@ -518,7 +779,7 @@ export default function App() {
               svgContent: response.svg_preview_content || null,
               dxfPath: filePath,
               isUnfolded: true,
-              unfoldedKfactor: 0.40,
+              unfoldedKfactor: 0.44,
               unfoldedBaseFace: 'DXF_Profile',
               isDxfOnly: true,
               flatElements: [{
@@ -530,7 +791,7 @@ export default function App() {
                 dxfPath: filePath,
                 svgContent: response.svg_preview_content || null,
                 isUnfolded: true,
-                unfoldedKfactor: 0.40,
+                unfoldedKfactor: 0.44,
                 unfoldedBaseFace: 'DXF_Profile',
                 quantity: 1,
                 active: true,
@@ -555,9 +816,16 @@ export default function App() {
               name: name,
               stepPath: filePath,
               quantity: 1,
-              kfactor: 0.40,
+              kfactor: response.kfactor ?? 0.44,
+              kFactorMode: 'material',
+              bendSummary: response.bend_summary,
+              bendRadius: response.metadata?.bend_radius || undefined,
+              mirror: true,
               baseFace: response.base_face,
               thickness: response.thickness,
+              material: response.material || 'MS',
+              materialName: response.material_name || 'Mild Steel',
+              density: response.density || 7850,
               totalFaces: response.total_face_count,
               planarFaces: response.planar_face_count,
               faces: response.faces,
@@ -575,6 +843,8 @@ export default function App() {
                 baseFace: faceName,
                 quantity: 1,
                 active: true,
+                thickness: response.thickness,
+                material: response.material_name || response.material || 'Mild Steel',
                 group: 'A'
               })) : []
             };
@@ -774,16 +1044,26 @@ export default function App() {
     };
   }, [activeTab, nestingDxfPath, parts, selectedPartId, fullScreenView]);
 
+  useEffect(() => {
+    if (nestedSheets[activeSheetIndex]) {
+      const matKey = `${(nestedSheets[activeSheetIndex] as any).material || 'Mild Steel'} (${(nestedSheets[activeSheetIndex] as any).thickness || 2.0}mm)`;
+      if (selectedMaterialFilter !== 'ALL' && selectedMaterialFilter !== matKey) {
+        setSelectedMaterialFilter(matKey);
+      }
+    }
+  }, [activeSheetIndex, nestedSheets, selectedMaterialFilter]);
+
   const addLog = (msg: string) => {
     setConsoleLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   };
 
   // Run unfolding on a specific flat element of a part
-  const handleRunUnfoldElement = async (partId: string, elementId: string, manageState = true) => {
+  const handleRunUnfoldElement = async (partId: string, elementId?: string, manageState = true, overrideBendStyle?: string, switchTab = false, overrideBaseFace?: string) => {
     const part = parts.find(p => p.id === partId);
     if (!part) return;
-    const fe = part.flatElements?.find(item => item.id === elementId);
-    if (!fe) return;
+    const activeStyle = overrideBendStyle || part.bendStyle || bendStyle;
+    const fe = elementId ? part.flatElements?.find(item => item.id === elementId) : part.flatElements?.[0];
+    const targetBaseFace = overrideBaseFace || fe?.baseFace || part.baseFace || 'Auto';
 
     const ext = part.stepPath.toLowerCase().split('.').pop() || '';
     const isRawCadFile = ['asm', 'psm', 'par', 'sldprt', 'sldasm'].includes(ext);
@@ -798,16 +1078,21 @@ export default function App() {
     if (manageState) setIsUnfolding(true);
     setErrorMessage(null);
     
-    addLog(`Starting unfolding for: ${part.name} [${fe.baseFace}]...`);
-    addLog(`Params: K-Factor = ${part.kfactor.toFixed(2)}, Base Face = ${fe.baseFace}`);
+    addLog(`Starting unfolding for: ${part.name} [${targetBaseFace}]...`);
+    addLog(`Params: K-Factor = ${part.kfactor.toFixed(5)}, Bend Style = ${activeStyle}, Base Face = ${targetBaseFace}${part.mirror ? ', Mirrored' : ''}`);
 
     try {
       const response = await window.electronAPI.runUnfold({
         stepPath: part.stepPath,
         kfactor: part.kfactor,
-        baseFace: fe.baseFace,
-        excludeBendLines: false,
-        bendStyle: 'tick'
+        baseFace: targetBaseFace,
+        excludeBendLines: activeStyle === 'none',
+        bendStyle: activeStyle,
+        mirror: part.mirror || false,
+        exportMinimalDimpleHoles: exportMinimalDimpleHoles,
+        bendRadius: part.bendRadius,
+        etchMarkerPosition: part.etchMarkerPosition || etchMarkerPosition,
+        etchMarkerLength: part.etchMarkerLength || etchMarkerLength
       });
 
       if (response.status === 'success') {
@@ -815,6 +1100,12 @@ export default function App() {
           if (p.id !== partId) return p;
           return {
             ...p,
+            bendStyle: activeStyle,
+            svgContent: response.svg_content || null,
+            dxfPath: response.dxf_path,
+            isUnfolded: true,
+            unfoldedKfactor: part.kfactor,
+            unfoldedBaseFace: response.base_face,
             flatElements: p.flatElements?.map(item => {
               if (item.id === elementId) {
                 return {
@@ -825,14 +1116,16 @@ export default function App() {
                   svgContent: response.svg_content || null,
                   isUnfolded: true,
                   unfoldedKfactor: part.kfactor,
-                  unfoldedBaseFace: item.baseFace || response.base_face
+                  unfoldedBaseFace: item.baseFace || response.base_face,
+                  unfoldedMirror: part.mirror || false,
+                  unfoldedBendStyle: activeStyle
                 };
               }
               return item;
             })
           };
         }));
-        
+
         if (response.projection_fallback) {
           addLog(`⚠ Note: Physical unfold trace failed (likely due to spline curves or thickness variances).`);
           addLog(`✓ Silhouette Projection blank successfully extracted & projected!`);
@@ -840,21 +1133,10 @@ export default function App() {
           addLog(`✓ Physical unfolding completed successfully!`);
         }
         addLog(`DXF file exported to: ${response.dxf_path}`);
-        
-        // Update parent part's overall unfold preview for backward compatibility
-        setParts(prev => prev.map(p => {
-          if (p.id !== partId) return p;
-          return {
-            ...p,
-            svgContent: response.svg_content || null,
-            dxfPath: response.dxf_path,
-            isUnfolded: true,
-            unfoldedKfactor: part.kfactor,
-            unfoldedBaseFace: response.base_face
-          };
-        }));
 
-        setActiveTab('flatten');
+        if (switchTab) {
+          setActiveTab('flatten');
+        }
       } else {
         setErrorMessage(response.error);
         addLog(`Unfold error: ${response.error}`);
@@ -869,31 +1151,115 @@ export default function App() {
 
   // Run unfolding on all active checked parts (from the main header button)
   const handleRunUnfold = async () => {
+    if (isUnfolding) return;
+
     const elementsToFlatten: { partId: string; elementId: string }[] = [];
     parts.forEach(p => {
       if (p.active !== false) {
-        p.flatElements?.forEach(fe => {
-          if (fe.active !== false) {
+        if (p.flatElements && p.flatElements.length > 0) {
+          p.flatElements.forEach(fe => {
             elementsToFlatten.push({ partId: p.id, elementId: fe.id });
-          }
-        });
+          });
+        } else {
+          elementsToFlatten.push({ partId: p.id, elementId: Math.random().toString(36).substring(2, 9) });
+        }
       }
     });
 
     if (elementsToFlatten.length === 0) {
       if (!selectedPart) return;
       const activeFe = selectedPart.flatElements?.find(fe => fe.id === selectedFlatElementId) || selectedPart.flatElements?.[0];
-      if (activeFe) {
-        await handleRunUnfoldElement(selectedPart.id, activeFe.id);
-      }
+      const targetElemId = activeFe ? activeFe.id : Math.random().toString(36).substring(2, 9);
+      await handleRunUnfoldElement(selectedPart.id, targetElemId);
       return;
     }
 
     setIsUnfolding(true);
     try {
-      for (let i = 0; i < elementsToFlatten.length; i++) {
-        const el = elementsToFlatten[i];
-        await handleRunUnfoldElement(el.partId, el.elementId, false);
+      const batchItems = elementsToFlatten.map(el => {
+        const p = parts.find(part => part.id === el.partId)!;
+        const fe = el.elementId ? p.flatElements?.find(item => item.id === el.elementId) : p.flatElements?.[0];
+        const activeStyle = p.bendStyle || bendStyle;
+        const targetBaseFace = fe?.baseFace || p.baseFace || 'Auto';
+
+        addLog(`Starting unfolding for: ${p.name} [${targetBaseFace}]...`);
+        addLog(`Params: K-Factor = ${p.kfactor.toFixed(5)}, Bend Style = ${activeStyle}, Base Face = ${targetBaseFace}${p.mirror ? ', Mirrored' : ''}`);
+
+        return {
+          partId: p.id,
+          elementId: el.elementId,
+          stepPath: p.stepPath,
+          kfactor: p.kfactor,
+          baseFace: targetBaseFace,
+          excludeBendLines: activeStyle === 'none',
+          bendStyle: activeStyle,
+          mirror: p.mirror || false,
+          exportMinimalDimpleHoles: exportMinimalDimpleHoles,
+          bendRadius: p.bendRadius,
+          etchMarkerPosition: p.etchMarkerPosition || etchMarkerPosition,
+          etchMarkerLength: p.etchMarkerLength || etchMarkerLength
+        };
+      });
+
+      const batchRes = await window.electronAPI.runUnfoldBatch(batchItems);
+
+      if (batchRes && batchRes.status === 'success' && Array.isArray(batchRes.results)) {
+        const elementResultMap = new Map<string, any>();
+        batchItems.forEach((item, idx) => {
+          if (batchRes.results[idx]) {
+            elementResultMap.set(item.elementId, batchRes.results[idx]);
+          }
+        });
+
+        // Log results outside the setParts state updater function
+        parts.forEach((p: PartItem) => {
+          const firstSuccessRes = p.flatElements
+            ?.map((fe: FlatElementItem) => elementResultMap.get(fe.id))
+            .find((res: any) => res && res.status === 'success');
+          if (firstSuccessRes) {
+            addLog(`✓ Physical unfolding completed successfully! (${p.name})`);
+            if (firstSuccessRes.dxf_path) addLog(`DXF file exported to: ${firstSuccessRes.dxf_path}`);
+          }
+        });
+
+        setParts(prevParts => prevParts.map(p => {
+          const hasAnyResult = p.flatElements?.some(fe => {
+            const res = elementResultMap.get(fe.id);
+            return res && res.status === 'success';
+          });
+          if (!hasAnyResult) return p;
+
+          const firstSuccessRes = p.flatElements
+            ?.map(fe => elementResultMap.get(fe.id))
+            .find(res => res && res.status === 'success');
+
+          return {
+            ...p,
+            bendStyle: p.bendStyle || bendStyle,
+            svgContent: firstSuccessRes?.svg_content || null,
+            dxfPath: firstSuccessRes?.dxf_path,
+            isUnfolded: true,
+            unfoldedKfactor: p.kfactor,
+            unfoldedBaseFace: firstSuccessRes?.base_face,
+            flatElements: p.flatElements?.map(item => {
+              const resItem = elementResultMap.get(item.id);
+              if (!resItem || resItem.status !== 'success') return item;
+              return {
+                ...item,
+                thickness: resItem.thickness || p.thickness,
+                baseFace: item.baseFace || resItem.base_face,
+                dxfPath: resItem.dxf_path,
+                svgContent: resItem.svg_content || null,
+                isUnfolded: true,
+                active: true,
+                unfoldedKfactor: p.kfactor,
+                unfoldedBaseFace: item.baseFace || resItem.base_face,
+                unfoldedMirror: p.mirror || false,
+                unfoldedBendStyle: p.bendStyle || bendStyle
+              };
+            })
+          };
+        }));
       }
     } finally {
       setIsUnfolding(false);
@@ -972,10 +1338,17 @@ export default function App() {
         sheetHeight,
         spacing: partSpacing,
         margin: borderMargin,
+        sheetCutoutWidth: sheetSize === 'remnant_lshape' ? remnantCutoutWidth : undefined,
+        sheetCutoutHeight: sheetSize === 'remnant_lshape' ? remnantCutoutHeight : undefined,
+        sheetProfile: sheetSize === 'remnant_lshape' ? 'lshape' : 'rect',
         autoFill: nestingConfigType === 'sets' && nestingMode === 'auto',
         rotations: getNestingRotations(),
         exportFilename,
         excludeBendLines: false,
+        bendStyle: bendStyle,
+        exportMinimalDimpleHoles: exportMinimalDimpleHoles,
+        etchMarkerPosition: etchMarkerPosition,
+        etchMarkerLength: etchMarkerLength,
         parts: activeElements.map(ae => {
           const isAuto = !!autoQuantityMap[ae.element.id];
           return {
@@ -989,7 +1362,12 @@ export default function App() {
             auto: isAuto,
             kfactor: ae.part.kfactor,
             baseFace: ae.element.baseFace,
-            group: ae.element.group || null
+            bendRadius: ae.part.bendRadius,
+            etchMarkerPosition: ae.part.etchMarkerPosition || etchMarkerPosition,
+            etchMarkerLength: ae.part.etchMarkerLength || etchMarkerLength,
+            group: ae.element.group || null,
+            material: ae.part.materialName || ae.part.material || 'Mild Steel',
+            thickness: ae.part.thickness || 2.0
           };
         })
       });
@@ -997,6 +1375,8 @@ export default function App() {
       if (response.status === 'success') {
         const sheets = (response.sheets || []).map((s: any) => ({
           index: s.index,
+          material: s.material || 'Mild Steel',
+          thickness: s.thickness || 2.0,
           utilization: s.utilization,
           dxfPath: s.dxf_path,
           pdfPath: s.pdf_path,
@@ -1013,8 +1393,9 @@ export default function App() {
           return sum + qty;
         }, 0);
 
-        // Check if solver resulted in multiple sheets and apply user capacity strategy preference
-        if (sheets.length > 1 && totalPartsRequested !== lastConfirmedMultiSheetQtyRef.current) {
+        // Check if solver exceeded single sheet capacity and apply user capacity strategy preference
+        const hasCapacityExceeded = sheets.length > 1 || (response.total_count !== undefined && response.total_count < totalPartsRequested);
+        if (hasCapacityExceeded && totalPartsRequested !== lastConfirmedMultiSheetQtyRef.current) {
           const getRecommendedLargerSize = (w: number, h: number) => {
             if (w <= 2500 && h <= 1250) {
               return { width: 3000, height: 1500, name: "Standard Large (3000 x 1500 mm)" };
@@ -1031,12 +1412,14 @@ export default function App() {
             const recommended = getRecommendedLargerSize(sheetWidth, sheetHeight);
             if (recommended) {
               lastConfirmedMultiSheetQtyRef.current = totalPartsRequested;
-              addLog(`Sheet capacity exceeded: expanding to ${recommended.name} based on preference (+Sheet Size).`);
+              addLog(`Sheet capacity exceeded: expanding to ${recommended.name} (+Sheet Size). Click 'Start Nesting Solver' to re-run with the new dimensions.`);
               setSheetWidth(recommended.width);
               setSheetHeight(recommended.height);
               setSheetSize(`${recommended.width}x${recommended.height}`);
+              // Mark as pending — user must manually trigger the new nest to avoid
+              // the race where isNesting briefly goes false then true via setTimeout.
+              setNestingPending(true);
               setIsNesting(false);
-              setTimeout(() => handleRunNesting(), 100);
               return;
             } else {
               setCapacityModalData({
@@ -1210,6 +1593,7 @@ export default function App() {
         const remaining = faces.filter(f => f !== faceName);
         nextBaseFace = remaining.join(',') || null;
         updatedFlatElements = updatedFlatElements.filter(fe => fe.baseFace !== faceName);
+        addLog(`Deselected face ${faceName} for ${p.name}. Base face: ${nextBaseFace || 'Auto'}.`);
       } else {
         faces.push(faceName);
         nextBaseFace = faces.join(',');
@@ -1223,9 +1607,38 @@ export default function App() {
           active: true,
           group: 'A'
         });
+        addLog(`Selected face ${faceName} for ${p.name}. Base face: ${nextBaseFace}. Click 'FLATTEN MODEL' to proceed.`);
       }
       return { ...p, baseFace: nextBaseFace, flatElements: updatedFlatElements };
     }));
+  };
+
+  const handleSetSoleBaseFace = (id: string, faceName: string) => {
+    setParts(prev => prev.map(p => {
+      if (p.id !== id) return p;
+      const existingFe = p.flatElements?.[0];
+      const elemId = existingFe ? existingFe.id : Math.random().toString(36).substring(2, 9);
+      const updatedFlatElements = [{
+        id: elemId,
+        partId: p.id,
+        name: `${p.name.replace(/\.[^/.]+$/, "")} [${faceName}]`,
+        parentName: p.name,
+        baseFace: faceName,
+        quantity: p.quantity,
+        active: true,
+        group: 'A' as const
+      }];
+      return { ...p, baseFace: faceName, flatElements: updatedFlatElements };
+    }));
+    addLog(`Set ${faceName} as primary base face for model. Click 'FLATTEN MODEL' to proceed.`);
+  };
+
+  const handleClearBaseFaces = (id: string) => {
+    setParts(prev => prev.map(p => {
+      if (p.id !== id) return p;
+      return { ...p, baseFace: null, flatElements: [] };
+    }));
+    addLog(`Cleared base face selection.`);
   };
 
   const handleCycleFlatElementGroup = (partId: string, elementId: string) => {
@@ -1406,7 +1819,7 @@ export default function App() {
         if (selectedPart) {
           const activeFe = selectedPart.flatElements?.find(fe => fe.id === selectedFlatElementId) || selectedPart.flatElements?.[0];
           if (activeFe) {
-            const needsUnfold = !activeFe.isUnfolded || activeFe.unfoldedKfactor !== selectedPart.kfactor;
+            const needsUnfold = !activeFe.isUnfolded || activeFe.unfoldedKfactor !== selectedPart.kfactor || activeFe.unfoldedMirror !== (selectedPart.mirror || false) || activeFe.unfoldedBendStyle !== (selectedPart.bendStyle || bendStyle);
             if (needsUnfold) {
               await handleRunUnfoldElement(selectedPart.id, activeFe.id);
             }
@@ -1418,7 +1831,7 @@ export default function App() {
         parts.forEach(p => {
           if (p.active !== false) {
             p.flatElements?.forEach(fe => {
-              if (fe.active !== false && (!fe.isUnfolded || fe.unfoldedKfactor !== p.kfactor)) {
+              if (fe.active !== false && (!fe.isUnfolded || fe.unfoldedKfactor !== p.kfactor || fe.unfoldedMirror !== (p.mirror || false) || fe.unfoldedBendStyle !== (p.bendStyle || bendStyle))) {
                 outdatedElements.push({ part: p, element: fe });
               }
             });
@@ -1460,24 +1873,6 @@ export default function App() {
     nestingInitialized
   ]);
 
-  const handleFaceClickWrapper = (partId: string, faceName: string) => {
-    const part = parts.find(p => p.id === partId);
-    if (!part) return;
-
-    const selectedFaces = part.baseFace ? part.baseFace.split(',').filter(Boolean) : [];
-
-    if (selectedFaces.includes(faceName)) {
-      handleUpdatePartBaseFace(partId, faceName);
-      setPendingFaceSelection(null);
-    } else {
-      if (selectedFaces.length === 0) {
-        handleUpdatePartBaseFace(partId, faceName);
-        setPendingFaceSelection(null);
-      } else {
-        setPendingFaceSelection({ partId, faceName });
-      }
-    }
-  };
 
   const handleUndoUnfold = (partId: string) => {
     setParts(prev => prev.map(p => {
@@ -1540,6 +1935,177 @@ export default function App() {
     }
     return [];
   }, [parts, combined3D, selectedPartId]);
+
+  // Compute combined SVG scene for 2D Flat view and full-screen view
+  const combinedSvgContent = React.useMemo(() => {
+    const unfoldedList = parts.flatMap(p =>
+      (p.flatElements || [])
+        .filter(fe => fe.isUnfolded && fe.svgContent && (fe.active !== false) && (p.active !== false))
+        .map(fe => ({ part: p, element: fe }))
+    );
+
+    if (unfoldedList.length === 0) return null;
+
+    let combinedGroups = '';
+    const maxRowWidth = 2200;
+    let currentX = 40;
+    let currentY = 40;
+    let rowMaxH = 0;
+    let totalMaxX = 0;
+
+    unfoldedList.forEach(({ element }) => {
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(element.svgContent!, 'image/svg+xml');
+        const svgNode = doc.querySelector('svg');
+        if (!svgNode) return;
+
+        svgNode.querySelectorAll('style').forEach(s => s.remove());
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+        const vbAttr = svgNode.getAttribute('viewBox');
+        if (vbAttr) {
+          const p = vbAttr.trim().split(/[\s,]+/).map(Number).filter(n => !isNaN(n));
+          if (p.length === 4 && p[2] > 0 && p[3] > 0) {
+            minX = p[0];
+            minY = p[1];
+            maxX = p[0] + p[2];
+            maxY = p[1] + p[3];
+          }
+        }
+
+        svgNode.querySelectorAll('path, polygon, polyline, rect, line, circle').forEach(el => {
+          el.setAttribute('vector-effect', 'non-scaling-stroke');
+          const f = el.getAttribute('fill');
+          if (f && (f === 'black' || f === '#000000' || f === '#000' || f.includes('rgb(0,0,0)'))) {
+            el.setAttribute('fill', 'rgba(56, 189, 248, 0.12)');
+          }
+
+          if (el.tagName === 'path') {
+            const d = el.getAttribute('d');
+            if (d) {
+              const matches = d.match(/-?\d+\.?\d*/g);
+              if (matches) {
+                for (let i = 0; i < matches.length - 1; i += 2) {
+                  const x = parseFloat(matches[i]);
+                  const y = parseFloat(matches[i + 1]);
+                  if (!isNaN(x) && !isNaN(y)) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                  }
+                }
+              }
+            }
+          } else if (el.tagName === 'polygon' || el.tagName === 'polyline') {
+            const pts = el.getAttribute('points');
+            if (pts) {
+              const matches = pts.match(/-?\d+\.?\d*/g);
+              if (matches) {
+                for (let i = 0; i < matches.length - 1; i += 2) {
+                  const x = parseFloat(matches[i]);
+                  const y = parseFloat(matches[i + 1]);
+                  if (!isNaN(x) && !isNaN(y)) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                  }
+                }
+              }
+            }
+          } else if (el.tagName === 'rect') {
+            const x = parseFloat(el.getAttribute('x') || '0');
+            const y = parseFloat(el.getAttribute('y') || '0');
+            const w = parseFloat(el.getAttribute('width') || '0');
+            const h = parseFloat(el.getAttribute('height') || '0');
+            if (x < minX) minX = x;
+            if (x + w > maxX) maxX = x + w;
+            if (y < minY) minY = y;
+            if (y + h > maxY) maxY = y + h;
+          } else if (el.tagName === 'circle') {
+            const cx = parseFloat(el.getAttribute('cx') || '0');
+            const cy = parseFloat(el.getAttribute('cy') || '0');
+            const r = parseFloat(el.getAttribute('r') || '0');
+            if (cx - r < minX) minX = cx - r;
+            if (cx + r > maxX) maxX = cx + r;
+            if (cy - r < minY) minY = cy - r;
+            if (cy + r > maxY) maxY = cy + r;
+          } else if (el.tagName === 'line') {
+            const x1 = parseFloat(el.getAttribute('x1') || '0');
+            const y1 = parseFloat(el.getAttribute('y1') || '0');
+            const x2 = parseFloat(el.getAttribute('x2') || '0');
+            const y2 = parseFloat(el.getAttribute('y2') || '0');
+            if (Math.min(x1, x2) < minX) minX = Math.min(x1, x2);
+            if (Math.max(x1, x2) > maxX) maxX = Math.max(x1, x2);
+            if (Math.min(y1, y2) < minY) minY = Math.min(y1, y2);
+            if (Math.max(y1, y2) > maxY) maxY = Math.max(y1, y2);
+          }
+        });
+
+        if (minX === Infinity || maxX === -Infinity || minX === maxX) {
+          minX = 0; minY = 0; maxX = 250; maxY = 250;
+        }
+
+        const boxW = Math.max(30, maxX - minX);
+        const boxH = Math.max(30, maxY - minY);
+
+        const rot = flatRotations[element.id] || 0;
+        const rad = (rot * Math.PI) / 180;
+        const cos = Math.abs(Math.cos(rad));
+        const sin = Math.abs(Math.sin(rad));
+
+        const effW = Math.max(40, boxW * cos + boxH * sin);
+        const effH = Math.max(40, boxW * sin + boxH * cos);
+
+        if (currentX > 40 && currentX + effW > maxRowWidth) {
+          currentX = 40;
+          currentY += rowMaxH + 60;
+          rowMaxH = 0;
+        }
+
+        rowMaxH = Math.max(rowMaxH, effH);
+        totalMaxX = Math.max(totalMaxX, currentX + effW);
+
+        const innerContent = svgNode.innerHTML;
+
+        combinedGroups += `<g class="unfolded-component" data-face="${element.baseFace}" transform="translate(${currentX}, ${currentY})">
+          <g transform="translate(${effW / 2}, ${effH / 2}) rotate(${rot}) translate(${-boxW / 2}, ${-boxH / 2}) translate(${-minX}, ${-minY})">
+            ${innerContent}
+          </g>
+          <text x="0" y="-12" font-family="monospace" font-size="12" font-weight="bold" fill="#33A3FF">${element.baseFace} (Qty: ${element.quantity})</text>
+        </g>`;
+
+        currentX += effW + 60;
+      } catch (err) {
+        console.error('Failed to parse flat SVG:', err);
+      }
+    });
+
+    if (!combinedGroups) return null;
+
+    const totalH = currentY + rowMaxH + 80;
+    const isDark = themeMode === 'dark';
+    const strokeOuter = isDark ? '#38BDF8' : '#0284C7';
+    const strokeHoles = isDark ? '#F59E0B' : '#D97706';
+    const fillColor = isDark ? 'rgba(56, 189, 248, 0.08)' : 'rgba(2, 132, 199, 0.05)';
+
+    return `<svg viewBox="0 0 ${Math.max(800, totalMaxX + 80)} ${Math.max(500, totalH)}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+      <style>
+        svg { background: transparent !important; }
+        path, polygon, polyline, rect { fill: ${fillColor} !important; fill-rule: evenodd !important; stroke: ${strokeOuter} !important; stroke-width: 1.2px !important; vector-effect: non-scaling-stroke !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
+        circle { stroke: ${strokeHoles} !important; fill: none !important; stroke-width: 1.2px !important; vector-effect: non-scaling-stroke !important; }
+        .cut, .layer-cut { stroke: ${strokeOuter} !important; stroke-width: 1.4px !important; fill: ${fillColor} !important; vector-effect: non-scaling-stroke !important; }
+        .cut-inner, .layer-holes { stroke: ${strokeHoles} !important; stroke-width: 1.2px !important; fill: none !important; vector-effect: non-scaling-stroke !important; }
+        .bend-centerline-up, .layer-up-bends { stroke: #10B981 !important; stroke-width: 1.2px !important; vector-effect: non-scaling-stroke !important; }
+        .bend-centerline-down, .layer-down-bends { stroke: #EF4444 !important; stroke-width: 1.2px !important; vector-effect: non-scaling-stroke !important; }
+        .fold { stroke: #10B981 !important; stroke-width: 1.2px !important; stroke-dasharray: 4,3 !important; vector-effect: non-scaling-stroke !important; }
+      </style>
+      ${combinedGroups}
+    </svg>`;
+  }, [parts, flatRotations, themeMode]);
 
   return (
     <div className="h-screen w-screen flex flex-col bg-industrial-bg select-none text-industrial-text overflow-hidden font-sans">
@@ -1627,6 +2193,20 @@ export default function App() {
                       <option value="180">180° Steps Only (0°, 180°)</option>
                       <option value="none">Fixed Grain (0° No Rotation)</option>
                     </select>
+                  </div>
+
+                  <div className="pt-2 border-t border-industrial-border">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveDropdown(null);
+                        setShowAdvancedModal(true);
+                      }}
+                      className="w-full text-left px-2 py-1.5 bg-industrial-darker hover:bg-industrial-border border border-industrial-border rounded transition text-industrial-accent font-bold cursor-pointer flex items-center justify-between text-[10px]"
+                    >
+                      <span className="flex items-center gap-1.5">⚙️ Advanced Settings...</span>
+                      <span className="text-[8px] text-industrial-muted">K-Factor & Mirror</span>
+                    </button>
                   </div>
                 </div>
               )}
@@ -1729,13 +2309,23 @@ export default function App() {
                     {activeTab === 'nesting' && <span>✓</span>}
                   </button>
                   <div className="h-[1px] bg-industrial-border/60 my-0.5"></div>
-                  <button
-                    onClick={() => { setActiveDropdown(null); setThemeMode(prev => prev === 'dark' ? 'light' : 'dark'); }}
-                    className="w-full text-left px-2.5 py-1.5 hover:bg-industrial-border hover:text-industrial-accent rounded transition text-industrial-text cursor-pointer flex items-center justify-between"
-                  >
-                    <span>🎨 Color Theme: {themeMode === 'dark' ? 'Dark Mode' : 'Light Mode'}</span>
-                    <span className="text-[8px] text-industrial-muted font-bold font-sans">Toggle</span>
-                  </button>
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-industrial-muted font-bold text-[9px] uppercase px-2.5 py-0.5">Themes:</span>
+                    <button
+                      onClick={() => { setActiveDropdown(null); setThemeMode('dark'); }}
+                      className={`w-full text-left px-2.5 py-1.5 hover:bg-industrial-border rounded transition cursor-pointer flex items-center justify-between ${themeMode === 'dark' ? 'text-industrial-accent font-bold' : 'text-industrial-text'}`}
+                    >
+                      <span>🌙 Dark Theme</span>
+                      {themeMode === 'dark' && <span>✓</span>}
+                    </button>
+                    <button
+                      onClick={() => { setActiveDropdown(null); setThemeMode('light'); }}
+                      className={`w-full text-left px-2.5 py-1.5 hover:bg-industrial-border rounded transition cursor-pointer flex items-center justify-between ${themeMode === 'light' ? 'text-industrial-accent font-bold' : 'text-industrial-text'}`}
+                    >
+                      <span>☀️ Light Theme</span>
+                      {themeMode === 'light' && <span>✓</span>}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1889,14 +2479,6 @@ export default function App() {
 
         {/* Right side status items */}
         <div className="flex gap-4 items-center z-30">
-          {/* Quick theme toggler */}
-          <button
-            onClick={() => setThemeMode(prev => prev === 'dark' ? 'light' : 'dark')}
-            className="p-2 bg-industrial-darker hover:bg-industrial-border border border-industrial-border rounded transition text-industrial-text cursor-pointer select-none"
-            title="Toggle Light/Dark Theme"
-          >
-            {themeMode === 'dark' ? '☀️' : '🌙'}
-          </button>
 
           {/* Primary Action Controls */}
           <button 
@@ -1981,8 +2563,40 @@ export default function App() {
               </div>
             </h3>
             
+            {/* Material Filter Tabs (Sticky outside scroll container) */}
+            {parts.length > 0 && (
+              <div className="flex items-center gap-1 overflow-x-auto pb-1 scrollbar-custom text-[9px] font-mono border-b border-industrial-border/60 pb-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setHierarchyMaterialFilter('ALL')}
+                  className={`px-2 py-0.5 rounded border transition cursor-pointer whitespace-nowrap ${
+                    hierarchyMaterialFilter === 'ALL'
+                      ? 'bg-industrial-accent text-white border-industrial-accent font-bold'
+                      : 'bg-industrial-darker text-industrial-muted hover:text-white border-industrial-border'
+                  }`}
+                >
+                  All ({parts.length})
+                </button>
+                {Array.from(new Set(parts.map(p => p.materialName || p.material || 'Mild Steel'))).map(matName => (
+                  <button
+                    key={matName}
+                    type="button"
+                    onClick={() => setHierarchyMaterialFilter(matName)}
+                    className={`px-2 py-0.5 rounded border transition cursor-pointer whitespace-nowrap ${
+                      hierarchyMaterialFilter === matName
+                        ? 'bg-industrial-accent text-white border-industrial-accent font-bold'
+                        : 'bg-industrial-darker text-industrial-muted hover:text-white border-industrial-border'
+                    }`}
+                  >
+                    {matName} ({parts.filter(p => (p.materialName || p.material || 'Mild Steel') === matName).length})
+                  </button>
+                ))}
+              </div>
+            )}
+            
             {parts.length > 0 ? (
-              <div className="flex flex-col gap-2 overflow-y-auto scrollbar-custom pr-1 max-h-[360px]">
+              <div className="flex flex-col gap-2 overflow-y-auto scrollbar-custom pr-1 max-h-[340px]">
+
                 {/* Combined View Node */}
                 <div 
                   onClick={() => {
@@ -2000,116 +2614,152 @@ export default function App() {
                 </div>
 
                 {/* Individual Model Nodes */}
-                {parts.map((part) => {
-                  const isSelected = !combined3D && selectedPartId === part.id;
-                  return (
-                    <div key={part.id} className="flex flex-col gap-1.5">
-                      <div 
-                        onClick={() => {
-                          setCombined3D(false);
-                          setSelectedPartId(part.id);
-                          if (activeTab !== 'nesting') {
-                            if (part.svgContent) {
-                              setActiveTab('flatten');
-                            } else {
-                              setActiveTab('import');
+                {parts
+                  .filter(part => hierarchyMaterialFilter === 'ALL' || (part.materialName || part.material || 'Mild Steel') === hierarchyMaterialFilter)
+                  .map((part) => {
+                    const isSelected = !combined3D && selectedPartId === part.id;
+                    const matColorCss = getMaterialColorCss(part.materialName || part.material);
+                    const isFacesExpanded = !!expandedPartFaces[part.id];
+                    return (
+                      <div key={part.id} className="flex flex-col gap-1">
+                        <div 
+                          onClick={() => {
+                            setCombined3D(false);
+                            setSelectedPartId(part.id);
+                            if (activeTab !== 'nesting') {
+                              if (part.svgContent) {
+                                setActiveTab('flatten');
+                              } else {
+                                setActiveTab('import');
+                              }
                             }
-                          }
-                        }}
-                        onMouseEnter={(e) => {
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          setHoveredPart(part);
-                          setHoverCoords({ x: rect.right + 10, y: rect.top });
-                        }}
-                        onMouseLeave={() => setHoveredPart(null)}
-                        className={`p-2.5 rounded border font-mono flex items-center gap-3 transition relative cursor-pointer ${
-                          part.active === false ? 'opacity-50 ' : ''
-                        }${
-                          isSelected 
-                            ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent font-bold' 
-                            : 'bg-industrial-darker border-industrial-border hover:border-industrial-muted text-industrial-muted'
-                        }`}
-                      >
-                        <input 
-                          type="checkbox" 
-                          checked={part.active !== false} 
-                          disabled={isAnalyzing || isUnfolding || isNesting}
-                          onChange={(e) => handleTogglePartActive(part.id, e as any)}
-                          onClick={(e) => e.stopPropagation()}
-                          className={`w-3.5 h-3.5 rounded border-industrial-border bg-industrial-darker text-industrial-accent accent-industrial-accent shrink-0 ${(isAnalyzing || isUnfolding || isNesting) ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
-                          title={part.active !== false ? "Exclude from Nesting" : "Include in Nesting"}
-                        />
-                        <div className="w-8 h-8 bg-industrial-card border border-industrial-border rounded overflow-hidden shrink-0 flex items-center justify-center p-0.5">
-                          {part.svgPreview ? (
-                            <div className="w-full h-full opacity-80" dangerouslySetInnerHTML={{ __html: part.svgPreview }} />
-                          ) : (
-                            <FileCode size={14} className="text-industrial-muted" />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-                          <div className="text-xs truncate flex items-center gap-1">
-                            {part.isDxfOnly && (
-                              <span className="text-[8px] font-bold px-1 rounded bg-teal-500/20 text-teal-400 border border-teal-500/40 shrink-0">DXF</span>
-                            )}
-                            <span className="truncate">{part.name}</span>
-                          </div>
-                          <div className="text-[9px] text-industrial-muted flex gap-2">
-                            <span>Qty/Set: {part.quantity}</span>
-                            <span>•</span>
-                            <span>{part.isDxfOnly ? '2D Flat Profile' : `${part.thickness.toFixed(1)}mm`}</span>
-                          </div>
-                        </div>
-                        <button 
-                          onClick={(e) => handleDeletePart(part.id, e)}
-                          disabled={isAnalyzing || isUnfolding || isNesting}
-                          className={`p-1 rounded transition shrink-0 ${(isAnalyzing || isUnfolding || isNesting) ? 'text-industrial-muted/30 cursor-not-allowed' : 'text-industrial-muted hover:text-red-400'}`}
+                          }}
+                          onDoubleClick={() => {
+                            setExpandedPartFaces(prev => ({ ...prev, [part.id]: !prev[part.id] }));
+                          }}
+                          onMouseEnter={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setHoveredPart(part);
+                            setHoverCoords({ x: rect.right + 10, y: rect.top });
+                          }}
+                          onMouseLeave={() => setHoveredPart(null)}
+                          className={`p-2.5 rounded border font-mono flex items-center gap-2.5 transition relative cursor-pointer ${
+                            part.active === false ? 'opacity-50 ' : ''
+                          }${
+                            isSelected 
+                              ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent font-bold' 
+                              : 'bg-industrial-darker border-industrial-border hover:border-industrial-muted text-industrial-muted'
+                          }`}
                         >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-
-                      {/* Indented Face Sub-list under Active Selected Model */}
-                      {isSelected && part.faces.length > 0 && (
-                        <div className="pl-5 flex flex-col gap-1 border-l border-industrial-border ml-4 mt-0.5 mb-1.5">
-                          <div className="text-[9px] font-bold text-industrial-muted font-mono mb-1 tracking-wider">SELECT BASE FLANGE:</div>
-                          {part.faces.map((f, i) => {
-                            const isPlanar = f.type === 'Plane';
-                            const isFaceSelected = part.baseFace ? part.baseFace.split(',').includes(f.name) : false;
-                            const isFaceHovered = hoveredFaceName === f.name;
-                            return (
-                              <div 
-                                key={i}
-                                onClick={() => isPlanar && !(isAnalyzing || isUnfolding || isNesting) && handleFaceClickWrapper(part.id, f.name)}
-                                onMouseEnter={() => isPlanar && setHoveredFaceName(f.name)}
-                                onMouseLeave={() => isPlanar && setHoveredFaceName(null)}
-                                className={`px-2 py-1 rounded border text-[9px] font-mono flex justify-between items-center transition ${
-                                  !isPlanar 
-                                    ? 'bg-transparent border-transparent text-industrial-muted/45 cursor-not-allowed' 
-                                    : isFaceSelected 
-                                    ? 'bg-industrial-orange/15 border-industrial-orange text-industrial-orange font-bold cursor-pointer'
-                                    : isFaceHovered
-                                    ? 'bg-industrial-accent/15 border-industrial-accent text-industrial-accent font-bold cursor-pointer'
-                                    : 'bg-industrial-darker/60 border-industrial-border text-industrial-muted hover:border-industrial-accent hover:text-industrial-accent cursor-pointer'
-                                }`}
+                          <input 
+                            type="checkbox" 
+                            checked={part.active !== false} 
+                            disabled={isAnalyzing || isUnfolding || isNesting}
+                            onChange={(e) => handleTogglePartActive(part.id, e as any)}
+                            onClick={(e) => e.stopPropagation()}
+                            className={`w-3.5 h-3.5 rounded border-industrial-border bg-industrial-darker text-industrial-accent accent-industrial-accent shrink-0 ${(isAnalyzing || isUnfolding || isNesting) ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                            title={part.active !== false ? "Exclude from Nesting" : "Include in Nesting"}
+                          />
+                          <div className="w-8 h-8 bg-industrial-card border border-industrial-border rounded overflow-hidden shrink-0 flex items-center justify-center p-0.5">
+                            {part.svgPreview ? (
+                              <div className="w-full h-full opacity-80" dangerouslySetInnerHTML={{ __html: part.svgPreview }} />
+                            ) : (
+                              <FileCode size={14} className="text-industrial-muted" />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                            <div className="text-xs truncate flex items-center gap-1">
+                              {part.isDxfOnly && (
+                                <span className="text-[8px] font-bold px-1 rounded bg-teal-500/20 text-teal-400 border border-teal-500/40 shrink-0">DXF</span>
+                              )}
+                              <span className="truncate">{part.name}</span>
+                            </div>
+                            <div className="text-[9px] text-industrial-muted flex items-center gap-1.5 flex-wrap">
+                              <span>Qty: {part.quantity}</span>
+                              <span>•</span>
+                              <span>{part.isDxfOnly ? '2D Flat' : `${part.thickness.toFixed(1)}mm`}</span>
+                              <span 
+                                className="px-1.5 py-0.2 rounded text-[8px] font-bold border"
+                                style={{
+                                  backgroundColor: `${matColorCss}15`,
+                                  borderColor: `${matColorCss}40`,
+                                  color: matColorCss
+                                }}
                               >
-                                <span className="truncate">{f.name}</span>
-                                <span className={`text-[8px] px-1 py-0.2 rounded font-sans ${
-                                  !isPlanar 
-                                    ? 'bg-industrial-border text-industrial-muted' 
-                                    : isFaceSelected 
-                                    ? 'bg-industrial-orange text-white' 
-                                    : 'bg-industrial-card text-industrial-accent'
-                                }`}>
-                                  {f.type}
-                                </span>
-                              </div>
-                            );
-                          })}
+                                {part.materialName || part.material || 'Mild Steel'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {part.faces && part.faces.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedPartFaces(prev => ({ ...prev, [part.id]: !prev[part.id] }));
+                              }}
+                              className="text-[8px] font-mono px-1 py-0.5 rounded bg-industrial-card hover:bg-industrial-border text-industrial-muted hover:text-white transition shrink-0"
+                              title="Click to toggle faces list (or double click card)"
+                            >
+                              {isFacesExpanded ? '▼' : '▶'} {part.faces.length}
+                            </button>
+                          )}
+
+                          <button 
+                            onClick={(e) => handleDeletePart(part.id, e)}
+                            disabled={isAnalyzing || isUnfolding || isNesting}
+                            className={`p-1 rounded transition shrink-0 ${(isAnalyzing || isUnfolding || isNesting) ? 'text-industrial-muted/30 cursor-not-allowed' : 'text-industrial-muted hover:text-red-400'}`}
+                          >
+                            <Trash2 size={13} />
+                          </button>
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
+
+                        {/* Indented Face Sub-list under Active Selected Model (Collapsed by default, double-click to expand) */}
+                        {isSelected && isFacesExpanded && part.faces.length > 0 && (
+                          <div className="pl-5 flex flex-col gap-1 border-l border-industrial-border ml-4 mt-0.5 mb-1.5">
+                            <div className="text-[9px] font-bold text-industrial-muted font-mono mb-1 tracking-wider">SELECT BASE FLANGE:</div>
+                            {part.faces.map((f, i) => {
+                              const isPlanar = f.type?.toUpperCase() === 'PLANE' || f.type === 'Plane';
+                              const isFaceSelected = part.baseFace ? part.baseFace.split(',').includes(f.name) : false;
+                              const isFaceHovered = hoveredFaceName === f.name;
+                              return (
+                                <div 
+                                  key={i}
+                                  onClick={() => isPlanar && !(isAnalyzing || isUnfolding || isNesting) && handleUpdatePartBaseFace(part.id, f.name)}
+                                  onMouseEnter={() => isPlanar && setHoveredFaceName(f.name)}
+                                  onMouseLeave={() => isPlanar && setHoveredFaceName(null)}
+                                  className={`px-2 py-1 rounded border text-[9px] font-mono flex justify-between items-center transition ${
+                                    !isPlanar 
+                                      ? 'bg-transparent border-transparent text-industrial-muted/45 cursor-not-allowed' 
+                                      : isFaceSelected 
+                                      ? 'bg-industrial-orange/20 border-industrial-orange text-industrial-orange font-bold cursor-pointer shadow-sm'
+                                      : isFaceHovered
+                                      ? 'bg-industrial-accent/15 border-industrial-accent text-industrial-accent font-bold cursor-pointer'
+                                      : 'bg-industrial-darker/60 border-industrial-border text-industrial-muted hover:border-industrial-accent hover:text-industrial-accent cursor-pointer'
+                                  }`}
+                                  title={!isPlanar ? "Non-planar face cannot be used as base flange" : isFaceSelected ? "Click to deselect this face" : "Click to select this face as base flange"}
+                                >
+                                  <span className="truncate flex items-center gap-1">
+                                    {isFaceSelected && <span className="text-industrial-orange font-bold text-[10px]">✓</span>}
+                                    <span>{f.name}</span>
+                                  </span>
+                                  <span className={`text-[8px] px-1 py-0.2 rounded font-sans ${
+                                    !isPlanar 
+                                      ? 'bg-industrial-border text-industrial-muted' 
+                                      : isFaceSelected 
+                                      ? 'bg-industrial-orange text-white' 
+                                      : 'bg-industrial-card text-industrial-accent'
+                                  }`}>
+                                    {f.type}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
               </div>
             ) : (
               <div 
@@ -2149,23 +2799,207 @@ export default function App() {
                 />
               </div>
 
-              {/* K-Factor */}
-              <div className="flex flex-col gap-1.5">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-industrial-muted font-medium">K-Factor</span>
-                  <span className="font-mono text-industrial-accent font-bold">{selectedPart.kfactor.toFixed(2)}</span>
+              {/* Material & K-Factor Configuration */}
+              {!selectedPart.isDxfOnly && (
+                <div className="flex flex-col gap-2.5 bg-industrial-darker/60 border border-industrial-border/60 p-2.5 rounded">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-bold text-industrial-text flex items-center gap-1">
+                      <Layers size={13} className="text-industrial-accent" /> CAD System & K-Preset
+                    </span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-industrial-dark border border-industrial-border text-industrial-accent font-bold" title="Double precision K-Factor">
+                      K = {selectedPart.kfactor.toFixed(6)}
+                    </span>
+                  </div>
+
+                  {/* Quick CAD Engine Parity Switcher */}
+                  <div className="flex flex-col gap-1.5 bg-industrial-dark/80 border border-industrial-border/80 p-2 rounded">
+                    <div className="flex justify-between items-center text-[10px] font-bold text-industrial-accent">
+                      <span>⚡ CAD Engine Parity Match:</span>
+                      <span className="text-[9px] text-industrial-muted font-normal">Instant 100% Geometry Match</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectKFactorMode('preset', 'solid_edge_tight')}
+                        className={`py-1 px-1 rounded text-[9px] font-bold font-mono transition text-center cursor-pointer border ${
+                          selectedPart.kFactorPreset === 'solid_edge_tight' || (selectedPart.kfactor >= 0.329 && selectedPart.kfactor <= 0.331)
+                            ? 'bg-blue-600/30 border-blue-400 text-blue-300 font-bold shadow'
+                            : 'bg-industrial-darker border-industrial-border text-industrial-muted hover:text-industrial-text'
+                        }`}
+                        title="Match Siemens Solid Edge flat pattern DXF (K = 0.330000)"
+                      >
+                        Solid Edge (0.33)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectKFactorMode('preset', 'fusion360_default')}
+                        className={`py-1 px-1 rounded text-[9px] font-bold font-mono transition text-center cursor-pointer border ${
+                          selectedPart.kFactorPreset === 'fusion360_default' || (selectedPart.kfactor >= 0.439 && selectedPart.kfactor <= 0.441 && selectedPart.kFactorPreset !== 'inventor_ansi')
+                            ? 'bg-orange-600/30 border-orange-400 text-orange-300 font-bold shadow'
+                            : 'bg-industrial-darker border-industrial-border text-industrial-muted hover:text-industrial-text'
+                        }`}
+                        title="Match Autodesk Fusion 360 / Inventor flat pattern DXF (K = 0.440000)"
+                      >
+                        Fusion 360 (0.44)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectKFactorMode('preset', 'solidworks_default')}
+                        className={`py-1 px-1 rounded text-[9px] font-bold font-mono transition text-center cursor-pointer border ${
+                          selectedPart.kFactorPreset === 'solidworks_default' || (selectedPart.kfactor >= 0.499 && selectedPart.kfactor <= 0.501)
+                            ? 'bg-emerald-600/30 border-emerald-400 text-emerald-300 font-bold shadow'
+                            : 'bg-industrial-darker border-industrial-border text-industrial-muted hover:text-industrial-text'
+                        }`}
+                        title="Match SolidWorks flat pattern DXF (K = 0.500000)"
+                      >
+                        SolidWorks (0.50)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* CAD System & Material Presets Selection Dropdown */}
+                  <select
+                    value={selectedPart.kFactorPreset || selectedPart.materialName || 'Mild Steel'}
+                    disabled={isAnalyzing || isUnfolding || isNesting}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const presetMatch = CAD_PRESETS_CATALOG.find(p => p.id === val);
+                      if (presetMatch) {
+                        handleSelectKFactorMode('preset', val);
+                      } else {
+                        handleSelectKFactorMode('material', val);
+                      }
+                    }}
+                    className="w-full bg-industrial-dark border border-industrial-border px-2 py-1.5 rounded text-xs font-mono text-industrial-text focus:border-industrial-accent outline-none cursor-pointer"
+                  >
+                    <optgroup label="--- CAD Software Defaults ---">
+                      {CAD_PRESETS_CATALOG.filter(p => p.category === 'software').map(p => (
+                        <option key={p.id} value={p.id}>{p.label} ({p.value.toFixed(6)})</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="--- International Standards ---">
+                      {CAD_PRESETS_CATALOG.filter(p => p.category === 'standard').map(p => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="--- Material Catalog Presets ---">
+                      <option value="Mild Steel">Mild Steel / CRCA (K = 0.440000)</option>
+                      <option value="Stainless Steel 304">Stainless Steel 304 (K = 0.450000)</option>
+                      <option value="Stainless Steel 316">Stainless Steel 316 (K = 0.450000)</option>
+                      <option value="Aluminium 5052">Aluminium 5052 (K = 0.400000)</option>
+                      <option value="Aluminium 6061">Aluminium 6061 (K = 0.400000)</option>
+                      <option value="Galvanized Iron">Galvanized Iron (K = 0.420000)</option>
+                      <option value="Copper">Copper (K = 0.380000)</option>
+                      <option value="Brass">Brass (K = 0.400000)</option>
+                    </optgroup>
+                  </select>
+
+                  {/* 4-Tier Mode Selector: CAD PRESET | DIN 6935 | ADAPTIVE | MANUAL */}
+                  <div className="grid grid-cols-4 gap-1 bg-industrial-dark p-0.5 rounded border border-industrial-border">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectKFactorMode('preset', selectedPart.kFactorPreset || 'solidworks_default')}
+                      className={`py-1 px-0.5 rounded text-[8px] font-bold font-mono transition text-center cursor-pointer ${
+                        selectedPart.kFactorMode === 'preset'
+                          ? 'bg-industrial-accent text-industrial-bg shadow-sm'
+                          : 'text-industrial-muted hover:text-industrial-text'
+                      }`}
+                      title="Use exact CAD system preset (SolidWorks, Inventor, Solid Edge, Creo, Trumpf)"
+                    >
+                      CAD PRESET
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectKFactorMode('din6935')}
+                      className={`py-1 px-0.5 rounded text-[8px] font-bold font-mono transition text-center cursor-pointer ${
+                        selectedPart.kFactorMode === 'din6935'
+                          ? 'bg-industrial-accent text-industrial-bg shadow-sm'
+                          : 'text-industrial-muted hover:text-industrial-text'
+                      }`}
+                      title="DIN 6935 logarithmic curve: K = 0.33 + 0.17*log10(R/T)"
+                    >
+                      DIN 6935
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectKFactorMode('adaptive')}
+                      className={`py-1 px-0.5 rounded text-[8px] font-bold font-mono transition text-center cursor-pointer ${
+                        selectedPart.kFactorMode === 'adaptive'
+                          ? 'bg-industrial-accent text-industrial-bg shadow-sm'
+                          : 'text-industrial-muted hover:text-industrial-text'
+                      }`}
+                      title="Adaptive K-factor based on inside radius to thickness (R/T) ratio"
+                    >
+                      ADAPTIVE
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectKFactorMode('manual')}
+                      className={`py-1 px-0.5 rounded text-[8px] font-bold font-mono transition text-center cursor-pointer ${
+                        selectedPart.kFactorMode === 'manual'
+                          ? 'bg-industrial-accent text-industrial-bg shadow-sm'
+                          : 'text-industrial-muted hover:text-industrial-text'
+                      }`}
+                      title="Manual custom K-factor input"
+                    >
+                      MANUAL
+                    </button>
+                  </div>
+
+                  {/* Calibration Trigger Button */}
+                  <button
+                    type="button"
+                    onClick={() => handleOpenCalibrationModal(selectedPart)}
+                    className="w-full py-1.5 bg-industrial-accent/15 hover:bg-industrial-accent/25 border border-industrial-accent/40 text-industrial-accent font-bold rounded text-xs transition cursor-pointer flex items-center justify-center gap-1.5 font-mono"
+                    title="Reverse-solve K-factor from a known physical sample or target CAD flat dimension"
+                  >
+                    🎯 Calibrate K-Factor
+                  </button>
                 </div>
-                <input 
-                  type="range" 
-                  min="0.10" 
-                  max="0.60" 
-                  step="0.01"
-                  value={selectedPart.kfactor} 
-                  disabled={isAnalyzing || isUnfolding || isNesting}
-                  onChange={(e) => handleUpdatePartKfactor(selectedPart.id, Number(e.target.value))}
-                  className="w-full h-1 bg-industrial-darker rounded-lg appearance-none cursor-pointer accent-industrial-accent disabled:opacity-50 disabled:cursor-not-allowed"
-                />
-              </div>
+              )}
+
+              {/* Bend Line Style Selection */}
+              {!selectedPart.isDxfOnly && (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-industrial-muted font-medium text-xs">Bend Line Style</span>
+                  <div className="grid grid-cols-2 gap-1 bg-industrial-darker p-0.5 rounded border border-industrial-border">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBendStyle('dashed');
+                        setParts(prev => prev.map(p => ({ ...p, bendStyle: 'dashed' })));
+                        addLog("Updated bend line style selection to 'DOTTED-DASH' for all models. Click Flatten Model to apply.");
+                      }}
+                      disabled={isAnalyzing || isUnfolding || isNesting}
+                      className={`py-1 px-1 rounded text-[9px] font-bold font-mono transition text-center cursor-pointer ${
+                        bendStyle === 'dashed'
+                          ? 'bg-industrial-accent text-industrial-bg shadow-sm'
+                          : 'text-industrial-muted hover:text-industrial-text'
+                      }`}
+                      title="Dotted & Dashed Combination Centerline"
+                    >
+                      DOTTED-DASH
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBendStyle('tick');
+                        setParts(prev => prev.map(p => ({ ...p, bendStyle: 'tick' })));
+                        addLog("Updated bend line style selection to 'TICKS' for all models. Click Flatten Model to apply.");
+                      }}
+                      disabled={isAnalyzing || isUnfolding || isNesting}
+                      className={`py-1 px-1 rounded text-[9px] font-bold font-mono transition text-center cursor-pointer ${
+                        bendStyle === 'tick'
+                          ? 'bg-industrial-accent text-industrial-bg shadow-sm'
+                          : 'text-industrial-muted hover:text-industrial-text'
+                      }`}
+                      title="Etch Tick Mark Indicators"
+                    >
+                      TICKS
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Dedicated Flatten 3D Model Button */}
               {!selectedPart.isDxfOnly && (
@@ -2518,6 +3352,19 @@ export default function App() {
                 FLAT
               </button>
               <button 
+                onClick={() => setActiveTab('jobgroups')}
+                disabled={parts.length === 0}
+                className={`px-4 py-1.5 rounded text-sm font-semibold tracking-wider transition hover-lift ${
+                  parts.length === 0
+                    ? 'text-industrial-muted/35 cursor-not-allowed' 
+                    : activeTab === 'jobgroups' 
+                    ? 'bg-industrial-border text-blue-400 border border-industrial-border shadow-sm' 
+                    : 'hover:text-industrial-text text-industrial-muted'
+                }`}
+              >
+                JOB QUEUES
+              </button>
+              <button 
                 onClick={() => setActiveTab('nesting')}
                 disabled={parts.length === 0}
                 className={`px-4 py-1.5 rounded text-sm font-semibold tracking-wider transition hover-lift ${
@@ -2570,23 +3417,6 @@ export default function App() {
               </div>
             )}
             
-            {/* Show Grid Overview button for multi-sheet nesting */}
-            {activeTab === 'nesting' && nestedSheets.length > 1 && (
-              <div className="flex items-center bg-industrial-card border border-industrial-border px-2 py-1 rounded text-xs">
-                <button
-                  onClick={() => setViewMode(prev => prev === 'single' ? 'grid' : 'single')}
-                  className={`px-2.5 py-0.5 rounded font-mono text-[10px] transition border cursor-pointer ${
-                    viewMode === 'grid'
-                      ? 'bg-industrial-orange text-industrial-bg border-industrial-orange font-bold font-sans'
-                      : 'bg-industrial-darker border-industrial-border text-industrial-muted hover:text-industrial-text hover:bg-industrial-border/40'
-                  }`}
-                  title="Toggle grid overview of all sheets"
-                >
-                  {viewMode === 'grid' ? '🗂 Single View' : '🗂 Show Grid Overview'}
-                </button>
-              </div>
-            )}
-
             {/* Status alerts */}
             {errorMessage && (
               <div className="flex items-center gap-2 bg-red-50 border border-red-300 text-red-700 text-xs px-3 py-1 rounded">
@@ -2733,15 +3563,6 @@ export default function App() {
             <div className="flex-1 flex gap-4 overflow-hidden">
               {/* Three.js Interactive 3D Orbiting Viewport */}
               <div className="flex-1 h-full min-w-0 relative">
-                {parts.length > 0 && (
-                  <button
-                    onClick={() => setFullScreenView('3d')}
-                    className="absolute top-3 right-[160px] z-10 p-1.5 bg-industrial-card/90 hover:bg-industrial-accent hover:text-industrial-bg border border-industrial-border rounded transition text-industrial-text shadow-md pointer-events-auto"
-                    title="Expand Viewport to Full Screen"
-                  >
-                    <Maximize2 size={12} />
-                  </button>
-                )}
                 {parts.length > 0 ? (
                   <Model3DViewer 
                     onToggleFullScreen={() => setFullScreenView('3d')}
@@ -2750,12 +3571,14 @@ export default function App() {
                     activeFace={selectedPart?.baseFace || null}
                     faces={selectedPart?.faces || []}
                     hoveredFaceName={hoveredFaceName}
-                    onFaceClick={(faceName) => {
-                      if (selectedPart) {
-                        handleFaceClickWrapper(selectedPart.id, faceName);
-                      }
-                    }}
+                    onFaceClick={(faceName) => selectedPart && handleUpdatePartBaseFace(selectedPart.id, faceName)}
                     onFaceHover={setHoveredFaceName}
+                    onSetBaseFace={(faceName) => selectedPart && handleSetSoleBaseFace(selectedPart.id, faceName)}
+                    onAddBaseFace={(faceName) => selectedPart && handleUpdatePartBaseFace(selectedPart.id, faceName)}
+                    onRemoveBaseFace={(faceName) => selectedPart && handleUpdatePartBaseFace(selectedPart.id, faceName)}
+                    onClearBaseFace={() => selectedPart && handleClearBaseFaces(selectedPart.id)}
+                    onSelectPart={(partId) => setSelectedPartId(partId)}
+                    selectedPartId={selectedPartId}
                     themeMode={themeMode}
                   />
                 ) : (
@@ -2823,6 +3646,14 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-y-2.5 text-[11px] pr-1">
                           <div className="text-industrial-muted">Part Name:</div>
                           <div className="text-industrial-text break-all font-semibold">{selectedPart.name}</div>
+
+                          <div className="text-industrial-muted font-bold">Material Alloy:</div>
+                          <div className="font-bold flex items-center gap-1.5 flex-wrap" style={{ color: getMaterialColorCss(selectedPart.materialName || selectedPart.material) }}>
+                            <span>{selectedPart.materialName || selectedPart.material || 'Mild Steel'}</span>
+                            <span className="text-[9px] px-1 py-0.2 rounded bg-industrial-darker border border-industrial-border opacity-80 text-industrial-muted font-mono">
+                              {selectedPart.density || 7850} kg/m³
+                            </span>
+                          </div>
                           
                           <div className="text-industrial-muted">Est. Thickness:</div>
                           <div className="text-industrial-orange font-bold">{formatVal(selectedPart.thickness)}</div>
@@ -2849,7 +3680,7 @@ export default function App() {
 
                       <div className="flex flex-col gap-2 pt-2 border-t border-industrial-border">
                         <button
-                          onClick={handleRunUnfold}
+                          onClick={() => setShowPreFlattenModal(true)}
                           disabled={isUnfolding || isAnalyzing || isNesting}
                           className="w-full py-2 bg-industrial-orange hover:bg-industrial-orange/90 text-white font-bold rounded text-xs text-center transition cursor-pointer shadow-md flex items-center justify-center gap-1.5 font-mono"
                           title="Run K-Factor unfolding for this 3D model"
@@ -2944,199 +3775,15 @@ export default function App() {
 
                   {/* Combined SVG Canvas */}
                   <div className="flex-1 min-h-0 relative">
-                    {(() => {
-                      const combinedSvg = (() => {
-                        const unfoldedList = parts.flatMap(p =>
-                          (p.flatElements || [])
-                            .filter(fe => fe.isUnfolded && fe.svgContent && (fe.active !== false) && (p.active !== false))
-                            .map(fe => ({ part: p, element: fe }))
-                        );
-
-                        if (unfoldedList.length === 0) return null;
-
-                        let combinedGroups = '';
-                        const maxRowWidth = 2200; // max row width in mm
-                        let currentX = 40;
-                        let currentY = 40;
-                        let rowMaxH = 0;
-                        let totalMaxX = 0;
-
-                        unfoldedList.forEach(({ element }) => {
-                          try {
-                            const parser = new DOMParser();
-                            const doc = parser.parseFromString(element.svgContent!, 'image/svg+xml');
-                            const svgNode = doc.querySelector('svg');
-                            if (!svgNode) return;
-
-                            // Remove embedded style tags
-                            svgNode.querySelectorAll('style').forEach(s => s.remove());
-
-                            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-                            const vbAttr = svgNode.getAttribute('viewBox');
-                            if (vbAttr) {
-                              const p = vbAttr.trim().split(/[\s,]+/).map(Number).filter(n => !isNaN(n));
-                              if (p.length === 4 && p[2] > 0 && p[3] > 0) {
-                                minX = p[0];
-                                minY = p[1];
-                                maxX = p[0] + p[2];
-                                maxY = p[1] + p[3];
-                              }
-                            }
-
-                            svgNode.querySelectorAll('path, polygon, polyline, rect, line, circle').forEach(el => {
-                              el.setAttribute('vector-effect', 'non-scaling-stroke');
-                              const f = el.getAttribute('fill');
-                              if (f && (f === 'black' || f === '#000000' || f === '#000' || f.includes('rgb(0,0,0)'))) {
-                                el.setAttribute('fill', 'rgba(56, 189, 248, 0.12)');
-                              }
-
-                              if (el.tagName === 'path') {
-                                const d = el.getAttribute('d');
-                                if (d) {
-                                  const matches = d.match(/-?\d+\.?\d*/g);
-                                  if (matches) {
-                                    for (let i = 0; i < matches.length - 1; i += 2) {
-                                      const x = parseFloat(matches[i]);
-                                      const y = parseFloat(matches[i + 1]);
-                                      if (!isNaN(x) && !isNaN(y)) {
-                                        if (x < minX) minX = x;
-                                        if (x > maxX) maxX = x;
-                                        if (y < minY) minY = y;
-                                        if (y > maxY) maxY = y;
-                                      }
-                                    }
-                                  }
-                                }
-                              } else if (el.tagName === 'polygon' || el.tagName === 'polyline') {
-                                const pts = el.getAttribute('points');
-                                if (pts) {
-                                  const matches = pts.match(/-?\d+\.?\d*/g);
-                                  if (matches) {
-                                    for (let i = 0; i < matches.length - 1; i += 2) {
-                                      const x = parseFloat(matches[i]);
-                                      const y = parseFloat(matches[i + 1]);
-                                      if (!isNaN(x) && !isNaN(y)) {
-                                        if (x < minX) minX = x;
-                                        if (x > maxX) maxX = x;
-                                        if (y < minY) minY = y;
-                                        if (y > maxY) maxY = y;
-                                      }
-                                    }
-                                  }
-                                }
-                              } else if (el.tagName === 'rect') {
-                                const x = parseFloat(el.getAttribute('x') || '0');
-                                const y = parseFloat(el.getAttribute('y') || '0');
-                                const w = parseFloat(el.getAttribute('width') || '0');
-                                const h = parseFloat(el.getAttribute('height') || '0');
-                                if (x < minX) minX = x;
-                                if (x + w > maxX) maxX = x + w;
-                                if (y < minY) minY = y;
-                                if (y + h > maxY) maxY = y + h;
-                              } else if (el.tagName === 'circle') {
-                                const cx = parseFloat(el.getAttribute('cx') || '0');
-                                const cy = parseFloat(el.getAttribute('cy') || '0');
-                                const r = parseFloat(el.getAttribute('r') || '0');
-                                if (cx - r < minX) minX = cx - r;
-                                if (cx + r > maxX) maxX = cx + r;
-                                if (cy - r < minY) minY = cy - r;
-                                if (cy + r > maxY) maxY = cy + r;
-                              } else if (el.tagName === 'line') {
-                                const x1 = parseFloat(el.getAttribute('x1') || '0');
-                                const y1 = parseFloat(el.getAttribute('y1') || '0');
-                                const x2 = parseFloat(el.getAttribute('x2') || '0');
-                                const y2 = parseFloat(el.getAttribute('y2') || '0');
-                                if (Math.min(x1, x2) < minX) minX = Math.min(x1, x2);
-                                if (Math.max(x1, x2) > maxX) maxX = Math.max(x1, x2);
-                                if (Math.min(y1, y2) < minY) minY = Math.min(y1, y2);
-                                if (Math.max(y1, y2) > maxY) maxY = Math.max(y1, y2);
-                              }
-                            });
-
-                            if (minX === Infinity || maxX === -Infinity || minX === maxX) {
-                              minX = 0; minY = 0; maxX = 250; maxY = 250;
-                            }
-
-                            const boxW = Math.max(30, maxX - minX);
-                            const boxH = Math.max(30, maxY - minY);
-
-                            const rot = flatRotations[element.id] || 0;
-                            const rad = (rot * Math.PI) / 180;
-                            const cos = Math.abs(Math.cos(rad));
-                            const sin = Math.abs(Math.sin(rad));
-
-                            const effW = Math.max(40, boxW * cos + boxH * sin);
-                            const effH = Math.max(40, boxW * sin + boxH * cos);
-
-                            if (currentX > 40 && currentX + effW > maxRowWidth) {
-                              currentX = 40;
-                              currentY += rowMaxH + 60;
-                              rowMaxH = 0;
-                            }
-
-                            rowMaxH = Math.max(rowMaxH, effH);
-                            totalMaxX = Math.max(totalMaxX, currentX + effW);
-
-                            const innerContent = svgNode.innerHTML;
-
-                            // Group transform mathematically normalizes bounding box to grid cell (currentX, currentY)
-                            combinedGroups += `<g class="unfolded-component" data-face="${element.baseFace}" transform="translate(${currentX}, ${currentY})">
-                              <g transform="translate(${effW / 2}, ${effH / 2}) rotate(${rot}) translate(${-boxW / 2}, ${-boxH / 2}) translate(${-minX}, ${-minY})">
-                                ${innerContent}
-                              </g>
-                              <text x="0" y="-12" font-family="monospace" font-size="12" font-weight="bold" fill="#33A3FF">${element.baseFace} (Qty: ${element.quantity})</text>
-                            </g>`;
-
-                            currentX += effW + 60; // 60mm column spacing gap
-                          } catch (err) {
-                            console.error('Failed to parse flat SVG:', err);
-                          }
-                        });
-
-                        if (!combinedGroups) return null;
-
-                        const totalH = currentY + rowMaxH + 80;
-                        const isDark = themeMode === 'dark';
-                        const strokeColor = isDark ? '#38BDF8' : '#0073CC';
-                        const strokeOutline = isDark ? '#F1F5F9' : '#1A1D2E';
-                        const fillColor = isDark ? 'rgba(56, 189, 248, 0.15)' : 'rgba(0, 115, 204, 0.1)';
-
-                        return `<svg viewBox="0 0 ${Math.max(800, totalMaxX + 60)} ${Math.max(500, totalH)}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
-                          <style>
-                            svg { background: transparent !important; }
-                            path { fill: ${fillColor} !important; fill-rule: evenodd !important; stroke: ${strokeColor} !important; stroke-width: 1.0px !important; vector-effect: non-scaling-stroke !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
-                            circle, line, polyline, rect { stroke: ${strokeColor} !important; stroke-width: 1.0px !important; vector-effect: non-scaling-stroke !important; }
-                            .cut { stroke: ${strokeOutline} !important; stroke-width: 1.2px !important; fill: ${fillColor} !important; vector-effect: non-scaling-stroke !important; }
-                            .fold { stroke: #10B981 !important; stroke-width: 1.0px !important; stroke-dasharray: 4,3 !important; vector-effect: non-scaling-stroke !important; }
-                          </style>
-                          ${combinedGroups}
-                        </svg>`;
-                      })();
-
-                      return (
-                        <>
-                          {combinedSvg && (
-                            <div className="absolute top-3 right-[136px] z-10 flex items-center gap-2 pointer-events-auto">
-                              <button
-                                onClick={() => setFullScreenView('flat')}
-                                className="p-1.5 bg-industrial-card/90 hover:bg-industrial-accent hover:text-industrial-bg border border-industrial-border rounded transition text-industrial-text shadow-md"
-                                title="Expand Viewport to Full Screen"
-                              >
-                                <Maximize2 size={12} />
-                              </button>
-                            </div>
-                          )}
-                          <FlatPreviewer
-                            onToggleFullScreen={() => setFullScreenView('flat')}
-                            svgContent={combinedSvg}
-                            baseFace="Combined 2D Flat Scene"
-                            thickness={selectedPart ? selectedPart.thickness : 2.0}
-                            themeMode={themeMode}
-                          />
-                        </>
-                      );
-                    })()}
+                    {combinedSvgContent && (
+                      <FlatPreviewer 
+                        svgContent={combinedSvgContent} 
+                        baseFace="Combined Flat Scene" 
+                        thickness={parts[0]?.thickness || 2.0} 
+                        onToggleFullScreen={() => setFullScreenView('flat')}
+                        themeMode={themeMode}
+                      />
+                    )}
                   </div>
                 </div>
               ) : (
@@ -3152,7 +3799,12 @@ export default function App() {
                           return (
                             <button
                               key={fe.id}
-                              onClick={() => setSelectedFlatElementId(fe.id)}
+                              onClick={() => {
+                                setSelectedFlatElementId(fe.id);
+                                if (selectedPart && fe && !fe.svgContent) {
+                                  handleRunUnfoldElement(selectedPart.id, fe.id, false, undefined, false, fe.baseFace);
+                                }
+                              }}
                               className={`px-2 py-0.5 rounded text-[10px] border transition cursor-pointer ${
                                 isActive
                                   ? 'bg-industrial-accent text-industrial-bg border-industrial-accent font-bold'
@@ -3171,9 +3823,10 @@ export default function App() {
                   {(() => {
                     const activeFe = selectedPart?.flatElements?.find(fe => fe.id === selectedFlatElementId) || selectedPart?.flatElements?.[0] || null;
                     const activeRot = activeFe ? flatRotations[activeFe.id] || 0 : 0;
+                    const activeSvg = activeFe?.svgContent || selectedPart?.svgContent || null;
                     return (
                       <div className="flex-1 min-h-0 relative">
-                        {activeFe && activeFe.svgContent && (
+                        {activeFe && activeSvg && (
                           <div className="absolute top-3 right-[136px] z-10 flex items-center gap-2 pointer-events-auto">
                             <button
                               onClick={() => {
@@ -3200,7 +3853,7 @@ export default function App() {
                         )}
                         <FlatPreviewer 
                           onToggleFullScreen={() => setFullScreenView('flat')}
-                          svgContent={activeFe ? activeFe.svgContent || null : null} 
+                          svgContent={activeSvg} 
                           baseFace={activeFe ? activeFe.baseFace : null} 
                           thickness={selectedPart ? selectedPart.thickness : 2.0} 
                           rotationAngle={activeRot}
@@ -3217,6 +3870,16 @@ export default function App() {
                   })()}
                 </>
               )}
+            </div>
+          ) : activeTab === 'jobgroups' ? (
+            <div className="flex-1 overflow-y-auto p-4 bg-industrial-darker/60 border border-industrial-border rounded-lg text-left animate-fade-in">
+              <JobGroupTab 
+                parts={parts}
+                onSelectGroupForNesting={(_group) => {
+                  setNestingInitialized(true);
+                  handleRunNesting();
+                }} 
+              />
             </div>
           ) : (
             <div className="flex-1 flex gap-4 overflow-hidden">
@@ -3238,51 +3901,140 @@ export default function App() {
                   </div>
                 )}
 
-                {viewMode === 'grid' && nestedSheets.length > 1 ? (
-                  /* Multi-Sheet Grid View */
-                  <div className="flex-1 min-h-0 overflow-y-auto bg-industrial-darker/60 border border-industrial-border rounded-lg p-4 scrollbar-custom">
-                    <div className="grid grid-cols-2 gap-4">
-                      {nestedSheets.map((sheet, sIdx) => (
-                        <div 
-                          key={sheet.index}
-                          onClick={() => {
-                            setActiveSheetIndex(sIdx);
-                            setNestingSvg(sheet.svgContent);
-                            setNestingDxfPath(sheet.dxfPath);
-                            setNestingPdfPath(sheet.pdfPath);
-                            setNestingGcodePath(sheet.gcodePath);
-                            setNestingUtilization(sheet.utilization);
-                            setViewMode('single');
-                            addLog(`Selected Sheet ${sheet.index} from grid overview.`);
-                          }}
-                          className={`bg-industrial-card border rounded-lg p-3 flex flex-col gap-2 cursor-pointer transition transform hover:-translate-y-0.5 shadow-lg group hover:shadow-xl text-left ${
-                            activeSheetIndex === sIdx ? 'border-industrial-accent' : 'border-industrial-border hover:border-industrial-accent/50'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between text-[11px] font-mono font-bold">
-                            <span className={activeSheetIndex === sIdx ? 'text-industrial-accent' : 'text-industrial-text/90 group-hover:text-industrial-accent'}>
-                              SHEET {sheet.index}
-                            </span>
-                            <span className="text-industrial-orange font-semibold">{sheet.utilization}% Utilization</span>
-                          </div>
-                          
-                          <div className="bg-industrial-darker p-3 rounded border border-industrial-border/60 flex items-center justify-center h-48 relative overflow-hidden">
-                            {/* Render small preview of the sheet SVG */}
-                            <div className="w-full h-full flex items-center justify-center select-none pointer-events-none scale-90" dangerouslySetInnerHTML={{ __html: sheet.svgContent }} />
-                            {activeSheetIndex === sIdx && (
-                              <div className="absolute top-2 right-2 bg-industrial-accent text-industrial-bg font-bold font-sans text-[8px] px-1 rounded uppercase tracking-wider">
-                                Active
-                              </div>
-                            )}
-                          </div>
-                          <div className="text-[9px] text-industrial-muted text-center italic group-hover:text-industrial-text transition">
-                            Click to open sheet layout for detailed view
-                          </div>
-                        </div>
-                      ))}
+                {/* Material & Thickness Filter Pills for Nested Sheets */}
+                {nestedSheets.length > 0 && (
+                  <div className="bg-industrial-card/80 border border-industrial-border rounded-lg p-2.5 flex items-center justify-between gap-3 text-xs font-mono shrink-0 select-none shadow-sm">
+                    <div className="flex items-center gap-2 overflow-x-auto scrollbar-custom pb-0.5 min-w-0">
+                      <span className="text-[10px] text-industrial-muted uppercase font-bold tracking-wider shrink-0 flex items-center gap-1">
+                        <span>⚡ Sheet Filter:</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedMaterialFilter('ALL');
+                          if (nestedSheets[0]) {
+                            setActiveSheetIndex(0);
+                            setNestingSvg(nestedSheets[0].svgContent);
+                            setNestingDxfPath(nestedSheets[0].dxfPath);
+                            setNestingPdfPath(nestedSheets[0].pdfPath);
+                            setNestingGcodePath(nestedSheets[0].gcodePath);
+                            setNestingUtilization(nestedSheets[0].utilization);
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded text-[10px] border transition cursor-pointer whitespace-nowrap font-bold ${
+                          selectedMaterialFilter === 'ALL'
+                            ? 'bg-industrial-accent text-white border-industrial-accent shadow-sm'
+                            : 'bg-industrial-darker text-industrial-muted hover:text-white border-industrial-border'
+                        }`}
+                      >
+                        All Sheets ({nestedSheets.length})
+                      </button>
+
+                      {Array.from(new Set(nestedSheets.map(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)`))).map(matKey => {
+                        const matchingSheets = nestedSheets.filter(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)` === matKey);
+                        return (
+                          <button
+                            key={matKey}
+                            type="button"
+                            onClick={() => {
+                              setSelectedMaterialFilter(matKey);
+                              const firstMatchingIdx = nestedSheets.findIndex(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)` === matKey);
+                              if (firstMatchingIdx >= 0) {
+                                setActiveSheetIndex(firstMatchingIdx);
+                                setNestingSvg(nestedSheets[firstMatchingIdx].svgContent);
+                                setNestingDxfPath(nestedSheets[firstMatchingIdx].dxfPath);
+                                setNestingPdfPath(nestedSheets[firstMatchingIdx].pdfPath);
+                                setNestingGcodePath(nestedSheets[firstMatchingIdx].gcodePath);
+                                setNestingUtilization(nestedSheets[firstMatchingIdx].utilization);
+                              }
+                            }}
+                            className={`px-2.5 py-1 rounded text-[10px] border transition cursor-pointer whitespace-nowrap font-bold ${
+                              selectedMaterialFilter === matKey
+                                ? 'bg-industrial-accent text-white border-industrial-accent shadow-sm'
+                                : 'bg-industrial-darker text-industrial-muted hover:text-white border-industrial-border'
+                            }`}
+                          >
+                            {matKey} ({matchingSheets.length})
+                          </button>
+                        );
+                      })}
                     </div>
+
+                    {nestedSheets.length > 1 && (
+                      <button
+                        onClick={() => setViewMode(prev => prev === 'single' ? 'grid' : 'single')}
+                        className={`px-2.5 py-1 rounded text-[10px] border transition cursor-pointer shrink-0 font-bold ${
+                          viewMode === 'grid'
+                            ? 'bg-industrial-orange text-industrial-bg border-industrial-orange'
+                            : 'bg-industrial-darker border-industrial-border text-industrial-muted hover:text-industrial-text'
+                        }`}
+                        title="Toggle Grid Overview of all sheets"
+                      >
+                        {viewMode === 'grid' ? '🗂 Single Sheet View' : '🗂 Grid Overview'}
+                      </button>
+                    )}
                   </div>
-                ) : nestingSvg ? (
+                )}
+
+                {(() => {
+                  const displayedSheets = selectedMaterialFilter === 'ALL'
+                    ? nestedSheets
+                    : nestedSheets.filter(s => `${(s as any).material || 'Mild Steel'} (${(s as any).thickness || 2.0}mm)` === selectedMaterialFilter);
+
+                  if (viewMode === 'grid' && nestedSheets.length > 1) {
+                    return (
+                      <div className="flex-1 min-h-0 overflow-y-auto bg-industrial-darker/60 border border-industrial-border rounded-lg p-4 scrollbar-custom">
+                        <div className="grid grid-cols-2 gap-4">
+                          {displayedSheets.map((sheet) => {
+                            const origIdx = nestedSheets.findIndex(ns => ns.index === sheet.index);
+                            return (
+                              <div 
+                                key={sheet.index}
+                                onClick={() => {
+                                  setActiveSheetIndex(origIdx);
+                                  setNestingSvg(sheet.svgContent);
+                                  setNestingDxfPath(sheet.dxfPath);
+                                  setNestingPdfPath(sheet.pdfPath);
+                                  setNestingGcodePath(sheet.gcodePath);
+                                  setNestingUtilization(sheet.utilization);
+                                  setViewMode('single');
+                                  addLog(`Selected Sheet ${sheet.index} (${(sheet as any).material || 'Mild Steel'}) from grid overview.`);
+                                }}
+                                className={`bg-industrial-card border rounded-lg p-3 flex flex-col gap-2 cursor-pointer transition transform hover:-translate-y-0.5 shadow-lg group hover:shadow-xl text-left ${
+                                  activeSheetIndex === origIdx ? 'border-industrial-accent' : 'border-industrial-border hover:border-industrial-accent/50'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between text-[11px] font-mono font-bold">
+                                  <div className="flex items-center gap-2">
+                                    <span className={activeSheetIndex === origIdx ? 'text-industrial-accent' : 'text-industrial-text/90 group-hover:text-industrial-accent'}>
+                                      SHEET {sheet.index}
+                                    </span>
+                                    <span className="px-2 py-0.5 text-[9px] font-bold text-blue-400 bg-blue-500/10 border border-blue-500/20 rounded">
+                                      {(sheet as any).material || 'Mild Steel'} ({(sheet as any).thickness || 2.0}mm)
+                                    </span>
+                                  </div>
+                                  <span className="text-industrial-orange font-semibold">{sheet.utilization}% Utilization</span>
+                                </div>
+                                
+                                <div className="bg-industrial-darker p-3 rounded border border-industrial-border/60 flex items-center justify-center h-48 relative overflow-hidden">
+                                  <div className="w-full h-full flex items-center justify-center select-none pointer-events-none scale-90" dangerouslySetInnerHTML={{ __html: sheet.svgContent }} />
+                                </div>
+                                <div className="text-[9px] text-industrial-muted text-center italic group-hover:text-industrial-text transition">
+                                  Click to open sheet layout for detailed view
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (!nestingSvg) return null;
+                  return null;
+                })()}
+
+                {viewMode !== 'grid' && nestingSvg ? (
                   <div className="flex-1 min-h-0 flex flex-col gap-3">
                     <div className="flex-1 min-h-0 relative">
                       {nestingSvg && (
@@ -3299,146 +4051,174 @@ export default function App() {
                         svgContent={nestingSvg} 
                         baseFace={null} 
                         thickness={0} 
-                        is3dView={true} 
+                        is3dView={false} 
                         title={`2D Nested Layout`}
                         themeMode={themeMode}
                       />
                     </div>
                     
-                    {/* Clean Pagination Controls below the sheet viewer */}
-                    {nestedSheets.length > 0 && (
-                      <div className="bg-industrial-card border border-industrial-border rounded-lg p-3 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono shrink-0 select-none">
-                        {/* Page navigation controls */}
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            disabled={activeSheetIndex === 0}
-                            onClick={() => {
-                              const prevIdx = activeSheetIndex - 1;
-                              setActiveSheetIndex(prevIdx);
-                              setNestingSvg(nestedSheets[prevIdx].svgContent);
-                              setNestingDxfPath(nestedSheets[prevIdx].dxfPath);
-                              setNestingPdfPath(nestedSheets[prevIdx].pdfPath);
-                              setNestingGcodePath(nestedSheets[prevIdx].gcodePath);
-                              setNestingUtilization(nestedSheets[prevIdx].utilization);
-                            }}
-                            className="px-2.5 py-1 bg-industrial-darker hover:bg-industrial-border border border-industrial-border hover:text-white rounded disabled:opacity-30 disabled:hover:bg-industrial-darker disabled:hover:text-industrial-muted transition cursor-pointer disabled:cursor-not-allowed font-bold"
-                            title="Previous Sheet"
-                          >
-                            &larr; Prev
-                          </button>
-                          
-                          {/* Simple list of sheet numbers */}
-                          <div className="flex items-center gap-1">
-                            {(() => {
-                              const maxPagesToShow = 8;
-                              const totalPages = nestedSheets.length;
-                              const pages: number[] = [];
-                              
-                              let startPage = Math.max(0, activeSheetIndex - Math.floor(maxPagesToShow / 2));
-                              let endPage = Math.min(totalPages - 1, startPage + maxPagesToShow - 1);
-                              
-                              if (endPage - startPage < maxPagesToShow - 1) {
-                                startPage = Math.max(0, endPage - maxPagesToShow + 1);
-                              }
-                              
-                              for (let i = startPage; i <= endPage; i++) {
-                                pages.push(i);
-                              }
-                              
-                              return (
-                                <>
-                                  {startPage > 0 && (
-                                    <>
-                                      <button
-                                        onClick={() => {
-                                          setActiveSheetIndex(0);
-                                          setNestingSvg(nestedSheets[0].svgContent);
-                                          setNestingDxfPath(nestedSheets[0].dxfPath);
-                                          setNestingPdfPath(nestedSheets[0].pdfPath);
-                                          setNestingGcodePath(nestedSheets[0].gcodePath);
-                                          setNestingUtilization(nestedSheets[0].utilization);
-                                        }}
-                                        className="px-2.5 py-1 text-[10px] rounded hover:bg-industrial-border text-industrial-muted hover:text-industrial-text transition cursor-pointer"
-                                      >
-                                        1
-                                      </button>
-                                      {startPage > 1 && <span className="text-industrial-muted text-[10px] px-0.5">...</span>}
-                                    </>
-                                  )}
-                                  
-                                  {pages.map(idx => (
-                                    <button
-                                      key={idx}
-                                      onClick={() => {
-                                        setActiveSheetIndex(idx);
-                                        setNestingSvg(nestedSheets[idx].svgContent);
-                                        setNestingDxfPath(nestedSheets[idx].dxfPath);
-                                        setNestingPdfPath(nestedSheets[idx].pdfPath);
-                                        setNestingGcodePath(nestedSheets[idx].gcodePath);
-                                        setNestingUtilization(nestedSheets[idx].utilization);
-                                      }}
-                                      className={`px-2.5 py-1 text-[10px] rounded font-bold transition cursor-pointer ${
-                                        activeSheetIndex === idx
-                                          ? 'bg-industrial-accent text-industrial-bg'
-                                          : 'text-industrial-muted hover:text-industrial-text hover:bg-industrial-border'
-                                      }`}
-                                    >
-                                      {idx + 1}
-                                    </button>
-                                  ))}
-                                  
-                                  {endPage < totalPages - 1 && (
-                                    <>
-                                      {endPage < totalPages - 2 && <span className="text-industrial-muted text-[10px] px-0.5">...</span>}
-                                      <button
-                                        onClick={() => {
-                                          const lastIdx = totalPages - 1;
-                                          setActiveSheetIndex(lastIdx);
-                                          setNestingSvg(nestedSheets[lastIdx].svgContent);
-                                          setNestingDxfPath(nestedSheets[lastIdx].dxfPath);
-                                          setNestingPdfPath(nestedSheets[lastIdx].pdfPath);
-                                          setNestingGcodePath(nestedSheets[lastIdx].gcodePath);
-                                          setNestingUtilization(nestedSheets[lastIdx].utilization);
-                                        }}
-                                        className="px-2.5 py-1 text-[10px] rounded hover:bg-industrial-border text-industrial-muted hover:text-industrial-text transition cursor-pointer"
-                                      >
-                                        {totalPages}
-                                      </button>
-                                    </>
-                                  )}
-                                </>
-                              );
-                            })()}
+                    {/* Comprehensive Selected Sheet Information Card below the sheet viewer */}
+                    {nestedSheets.length > 0 && (() => {
+                      const curSheet = nestedSheets[activeSheetIndex] || nestedSheets[0];
+                      const matName = (curSheet as any).material || 'Mild Steel';
+                      const thickVal = (curSheet as any).thickness || 2.0;
+                      const sheetAreaM2 = (sheetWidth * sheetHeight) / 1000000;
+                      const usedAreaM2 = (sheetAreaM2 * (curSheet.utilization / 100));
+                      const scrapAreaM2 = (sheetAreaM2 - usedAreaM2);
+                      const scrapPercent = (100 - curSheet.utilization).toFixed(1);
+
+                      const getCleanFilename = (sheet: any, ext: 'dxf' | 'pdf' | 'nc') => {
+                        const matClean = ((sheet?.material || 'Mild_Steel') as string)
+                          .replace(/[^a-zA-Z0-9]+/g, '_')
+                          .replace(/^_+|_+$/g, '');
+                        const thickClean = `${sheet?.thickness || 2.0}mm`;
+                        const idxStr = `Sheet_${sheet?.index || (activeSheetIndex + 1)}_of_${nestedSheets.length}`;
+                        const dimStr = `${sheetWidth}x${sheetHeight}mm`;
+                        return `Cadanest_${matClean}_${thickClean}_${idxStr}_${dimStr}.${ext}`;
+                      };
+
+                      return (
+                        <div className="bg-industrial-card border border-industrial-border rounded-lg p-3.5 flex flex-col gap-3 font-mono text-xs shrink-0 select-none shadow-lg text-left">
+                          {/* Top Row: Page Navigation & Active Sheet Title */}
+                          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-industrial-border/60 pb-2.5">
+                            <div className="flex items-center gap-2">
+                              <button
+                                disabled={activeSheetIndex === 0}
+                                onClick={() => {
+                                  const prevIdx = activeSheetIndex - 1;
+                                  setActiveSheetIndex(prevIdx);
+                                  setNestingSvg(nestedSheets[prevIdx].svgContent);
+                                  setNestingDxfPath(nestedSheets[prevIdx].dxfPath);
+                                  setNestingPdfPath(nestedSheets[prevIdx].pdfPath);
+                                  setNestingGcodePath(nestedSheets[prevIdx].gcodePath);
+                                  setNestingUtilization(nestedSheets[prevIdx].utilization);
+                                }}
+                                className="px-2.5 py-1 bg-industrial-darker hover:bg-industrial-border border border-industrial-border hover:text-white rounded disabled:opacity-30 transition cursor-pointer disabled:cursor-not-allowed font-bold"
+                                title="Previous Sheet"
+                              >
+                                &larr; Prev
+                              </button>
+
+                              <div className="flex items-center gap-1">
+                                {nestedSheets.map((_s, idx) => (
+                                  <button
+                                    key={idx}
+                                    onClick={() => {
+                                      setActiveSheetIndex(idx);
+                                      setNestingSvg(nestedSheets[idx].svgContent);
+                                      setNestingDxfPath(nestedSheets[idx].dxfPath);
+                                      setNestingPdfPath(nestedSheets[idx].pdfPath);
+                                      setNestingGcodePath(nestedSheets[idx].gcodePath);
+                                      setNestingUtilization(nestedSheets[idx].utilization);
+                                    }}
+                                    className={`px-2.5 py-1 text-[10px] rounded font-bold transition cursor-pointer ${
+                                      activeSheetIndex === idx
+                                        ? 'bg-industrial-accent text-white shadow-sm'
+                                        : 'text-industrial-muted hover:text-industrial-text hover:bg-industrial-border'
+                                    }`}
+                                  >
+                                    Sheet {idx + 1}
+                                  </button>
+                                ))}
+                              </div>
+
+                              <button
+                                disabled={activeSheetIndex === nestedSheets.length - 1}
+                                onClick={() => {
+                                  const nextIdx = activeSheetIndex + 1;
+                                  setActiveSheetIndex(nextIdx);
+                                  setNestingSvg(nestedSheets[nextIdx].svgContent);
+                                  setNestingDxfPath(nestedSheets[nextIdx].dxfPath);
+                                  setNestingPdfPath(nestedSheets[nextIdx].pdfPath);
+                                  setNestingGcodePath(nestedSheets[nextIdx].gcodePath);
+                                  setNestingUtilization(nestedSheets[nextIdx].utilization);
+                                }}
+                                className="px-2.5 py-1 bg-industrial-darker hover:bg-industrial-border border border-industrial-border hover:text-white rounded disabled:opacity-30 transition cursor-pointer disabled:cursor-not-allowed font-bold"
+                                title="Next Sheet"
+                              >
+                                Next &rarr;
+                              </button>
+                            </div>
+
+                            {/* Active Sheet Badge */}
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] font-bold text-industrial-accent">
+                                Active Sheet {curSheet.index} of {nestedSheets.length}
+                              </span>
+                              <span className="px-2.5 py-0.5 text-[10px] font-bold text-blue-400 bg-blue-500/10 border border-blue-500/20 rounded-full">
+                                {matName} ({thickVal}mm)
+                              </span>
+                            </div>
                           </div>
 
-                          <button
-                            disabled={activeSheetIndex === nestedSheets.length - 1}
-                            onClick={() => {
-                              const nextIdx = activeSheetIndex + 1;
-                              setActiveSheetIndex(nextIdx);
-                              setNestingSvg(nestedSheets[nextIdx].svgContent);
-                              setNestingDxfPath(nestedSheets[nextIdx].dxfPath);
-                              setNestingPdfPath(nestedSheets[nextIdx].pdfPath);
-                              setNestingGcodePath(nestedSheets[nextIdx].gcodePath);
-                              setNestingUtilization(nestedSheets[nextIdx].utilization);
-                            }}
-                            className="px-2.5 py-1 bg-industrial-darker hover:bg-industrial-border border border-industrial-border hover:text-white rounded disabled:opacity-30 disabled:hover:bg-industrial-darker disabled:hover:text-industrial-muted transition cursor-pointer disabled:cursor-not-allowed font-bold"
-                            title="Next Sheet"
-                          >
-                            Next &rarr;
-                          </button>
+                          {/* Middle Row: Detailed Information Grid */}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-industrial-darker/60 p-3 rounded-lg border border-industrial-border/40 text-[11px]">
+                            <div>
+                              <span className="text-industrial-muted text-[10px] block uppercase font-bold">Sheet Stock Size:</span>
+                              <strong className="text-industrial-text">{sheetWidth} × {sheetHeight} mm</strong>
+                              <span className="text-[9px] text-industrial-muted block">({sheetAreaM2.toFixed(3)} m²)</span>
+                            </div>
+
+                            <div>
+                              <span className="text-industrial-muted text-[10px] block uppercase font-bold">Material Utilization:</span>
+                              <strong className="text-industrial-orange font-bold text-xs">{curSheet.utilization}%</strong>
+                              <span className="text-[9px] text-industrial-muted block">({usedAreaM2.toFixed(3)} m² cut)</span>
+                            </div>
+
+                            <div>
+                              <span className="text-industrial-muted text-[10px] block uppercase font-bold">Scrap / Offcut:</span>
+                              <strong className="text-gray-300 font-semibold">{scrapPercent}%</strong>
+                              <span className="text-[9px] text-industrial-muted block">({scrapAreaM2.toFixed(3)} m² scrap)</span>
+                            </div>
+
+                            <div>
+                              <span className="text-industrial-muted text-[10px] block uppercase font-bold">Nested Blanks:</span>
+                              <strong className="text-industrial-accent font-bold">{curSheet.nestedCount} Parts</strong>
+                              <span className="text-[9px] text-industrial-muted block">Margin: {borderMargin}mm | Gap: {partSpacing}mm</span>
+                            </div>
+                          </div>
+
+                          {/* Bottom Row: Direct Export Options with Standard Production Filenames */}
+                          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                            <div className="text-[10px] text-industrial-muted italic">
+                              Standardized Production Export Filename: <span className="text-industrial-accent font-mono font-semibold">{getCleanFilename(curSheet, 'dxf')}</span>
+                            </div>
+
+                            <div className="flex items-center gap-2 text-xs">
+                              {curSheet.dxfPath && (
+                                <button
+                                  onClick={() => handleSaveDxfAs(curSheet.dxfPath, getCleanFilename(curSheet, 'dxf'))}
+                                  className="px-2.5 py-1 bg-industrial-accent/20 hover:bg-industrial-accent/30 text-industrial-accent border border-industrial-accent/40 rounded transition flex items-center gap-1 font-bold text-[10px]"
+                                  title="Export 2D DXF Flat Cutting Contour"
+                                >
+                                  <Download size={11} /> Save DXF
+                                </button>
+                              )}
+
+                              {curSheet.pdfPath && (
+                                <button
+                                  onClick={() => handleSaveDxfAs(curSheet.pdfPath, getCleanFilename(curSheet, 'pdf'))}
+                                  className="px-2.5 py-1 bg-industrial-orange/20 hover:bg-industrial-orange/30 text-industrial-orange border border-industrial-orange/40 rounded transition flex items-center gap-1 font-bold text-[10px]"
+                                  title="Export PDF Fabrication Summary Sheet"
+                                >
+                                  <Download size={11} /> Save Fab PDF
+                                </button>
+                              )}
+
+                              {curSheet.gcodePath && (
+                                <button
+                                  onClick={() => handleSaveDxfAs(curSheet.gcodePath, getCleanFilename(curSheet, 'nc'))}
+                                  className="px-2.5 py-1 bg-industrial-card hover:bg-industrial-border text-industrial-text border border-industrial-border rounded transition flex items-center gap-1 font-bold text-[10px]"
+                                  title="Export Laser Toolpath G-Code (.NC)"
+                                >
+                                  <Download size={11} /> Save G-Code
+                                </button>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                        
-                        {/* Clean Metadata next to the pagination */}
-                        <div className="text-[10px] text-industrial-muted flex items-center gap-2">
-                          <span>Active: <strong className="text-industrial-accent">Sheet {activeSheetIndex + 1} of {nestedSheets.length}</strong></span>
-                          <span className="text-industrial-border/60">|</span>
-                          <span>Utilization: <strong className="text-industrial-orange">{nestingUtilization}%</strong></span>
-                          <span className="text-industrial-border/60">|</span>
-                          <span>Placed: <strong className="text-industrial-text">{nestedSheets[activeSheetIndex].nestedCount} parts</strong></span>
-                        </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 ) : !nestingInitialized ? (
                   <div className="h-full w-full bg-industrial-darker border border-industrial-border rounded-lg flex flex-col items-center justify-center text-industrial-muted font-mono text-center gap-6 p-8">
@@ -3730,6 +4510,12 @@ export default function App() {
             <Info size={12} /> {hoveredPart.name}
           </div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 bg-industrial-darker p-2 rounded">
+            <div className="text-industrial-muted font-bold">Material:</div>
+            <div className="text-right font-bold flex items-center justify-end gap-1" style={{ color: getMaterialColorCss(hoveredPart.materialName || hoveredPart.material) }}>
+              <span>{hoveredPart.materialName || hoveredPart.material || 'Mild Steel'}</span>
+              <span className="text-[8px] font-normal text-industrial-muted">({hoveredPart.density || 7850}kg/m³)</span>
+            </div>
+
             <div className="text-industrial-muted">Est. Thickness:</div>
             <div className="text-industrial-orange font-bold text-right">{hoveredPart.thickness.toFixed(1)} mm</div>
             
@@ -3869,6 +4655,122 @@ export default function App() {
               >
                 Close Shortcuts
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Precision K-Factor Calibration Solver Modal */}
+      {showCalibrationModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-industrial-bg/85 backdrop-blur-sm p-4 font-mono select-text">
+          <div className="bg-industrial-card border border-industrial-border rounded-lg shadow-2xl max-w-lg w-full overflow-hidden flex flex-col animate-fade-in text-left">
+            {/* Header */}
+            <div className="bg-industrial-darker border-b border-industrial-border px-5 py-3.5 flex items-center justify-between text-industrial-accent text-sm font-bold">
+              <span className="flex items-center gap-2">🎯 PRECISION K-FACTOR CALIBRATION SOLVER</span>
+              <button
+                onClick={() => setShowCalibrationModal(false)}
+                className="text-industrial-muted hover:text-white font-extrabold text-base cursor-pointer"
+                title="Close modal"
+              >
+                &times;
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-5 flex flex-col gap-4 text-xs">
+              {/* Part Specs Card */}
+              {selectedPart && (
+                <div className="bg-industrial-darker p-3 rounded border border-industrial-border flex flex-col gap-1.5">
+                  <div className="flex justify-between items-center text-industrial-text font-bold">
+                    <span>Part: {selectedPart.name}</span>
+                    <span className="text-industrial-accent font-mono">T = {selectedPart.thickness.toFixed(2)} mm</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[11px] text-industrial-muted pt-1 border-t border-industrial-border/50">
+                    <div>Bends (N): <span className="text-industrial-text font-bold">{selectedPart.bendSummary?.bend_count ?? 'N/A'}</span></div>
+                    <div>Avg Radius (R): <span className="text-industrial-text font-bold">{(selectedPart.bendSummary?.avg_radius ?? selectedPart.bendRadius ?? 1.0).toFixed(2)} mm</span></div>
+                    <div>Straight Sum (ΣL): <span className="text-industrial-text font-bold">{(selectedPart.bendSummary?.straight_sum ?? selectedPart.dimensions.x).toFixed(2)} mm</span></div>
+                    <div>Current Unfolded Flat: <span className="text-industrial-text font-bold">{(selectedPart.flatElements?.[0]?.width || selectedPart.dimensions.x).toFixed(2)} mm</span></div>
+                  </div>
+                </div>
+              )}
+
+              {/* Target Measured Flat Input */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-industrial-text font-bold text-xs flex justify-between">
+                  <span>Target Reference Flat Dimension (L_target in mm):</span>
+                  <span className="text-[10px] text-industrial-muted font-normal">Physical sample / CAD table</span>
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={targetFlatLengthInput}
+                    onChange={(e) => setTargetFlatLengthInput(e.target.value)}
+                    placeholder="e.g. 231.048"
+                    className="flex-1 bg-industrial-darker border border-industrial-border px-3 py-2 rounded text-sm font-mono text-industrial-accent font-bold focus:border-industrial-accent outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleCalibrateKFactor}
+                    disabled={isCalibrating || !targetFlatLengthInput}
+                    className="px-4 py-2 bg-industrial-accent hover:bg-industrial-accent/90 disabled:opacity-50 text-industrial-bg font-bold rounded text-xs transition cursor-pointer flex items-center gap-1 font-mono"
+                  >
+                    {isCalibrating ? 'SOLVING...' : 'CALIBRATE'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Error Alert */}
+              {calibrationError && (
+                <div className="bg-red-500/10 border border-red-500/40 text-red-400 p-2.5 rounded text-[11px] flex items-center gap-2">
+                  <AlertTriangle size={14} className="shrink-0" />
+                  <span>{calibrationError}</span>
+                </div>
+              )}
+
+              {/* Calibrated Result Panel */}
+              {calibratedKResult !== null && (
+                <div className="bg-industrial-accent/10 border border-industrial-accent/40 p-3.5 rounded flex flex-col gap-2 animate-fade-in">
+                  <div className="flex justify-between items-center">
+                    <span className="text-industrial-muted text-xs uppercase tracking-wider font-bold">Reverse-Solved K-Factor</span>
+                    <span className="text-xl font-bold font-mono text-industrial-accent">
+                      K = {calibratedKResult.toFixed(4)}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-industrial-muted leading-relaxed">
+                    Exact neutral axis offset ratio derived using closed-form linear back-solver. Precision: 4 decimal places (10⁻⁴).
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="bg-industrial-darker/80 border-t border-industrial-border px-5 py-3 flex items-center justify-end gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowCalibrationModal(false)}
+                className="px-3.5 py-1.5 bg-industrial-dark hover:bg-industrial-border text-industrial-muted hover:text-white rounded font-bold text-xs transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              {calibratedKResult !== null && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => handleApplyCalibratedKFactor(true)}
+                    className="px-3.5 py-1.5 bg-industrial-dark border border-industrial-accent/50 text-industrial-accent hover:bg-industrial-accent/10 rounded font-bold text-xs transition cursor-pointer"
+                  >
+                    Set as Material Default
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleApplyCalibratedKFactor(false)}
+                    className="px-4 py-1.5 bg-industrial-accent hover:bg-industrial-accent/90 text-industrial-bg rounded font-bold text-xs transition cursor-pointer shadow"
+                  >
+                    Apply to Part
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -4113,79 +5015,246 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
 
       {/* Full-Screen Visualizer Overlays */}
       {fullScreenView === '3d' && parts.length > 0 && (
-        <div className="fixed inset-0 z-50 bg-industrial-bg/95 flex flex-col p-6 font-mono text-xs">
-          <div className="flex items-center justify-between border-b border-industrial-border pb-3 mb-4 shrink-0">
+        <div className="fixed inset-0 z-[100] bg-industrial-bg w-screen h-screen flex flex-col p-4 font-mono text-xs overflow-hidden">
+          <div className="flex items-center justify-between border-b border-industrial-border pb-3 mb-3 shrink-0">
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 bg-industrial-accent rounded-full animate-ping"></span>
-              <span className="font-bold text-sm text-industrial-accent uppercase tracking-wider">3D SOURCE VIEWER - FULL SCREEN MODE</span>
-              <span className="text-industrial-muted">({combined3D ? `Combined Scene: ${parts.length} parts` : `Single Part: ${selectedPart?.name}`})</span>
+              <span className="font-bold text-sm text-industrial-accent uppercase tracking-wider">
+                {combined3D ? `3D COMBINED SCENE - FULL SCREEN MODE (${parts.length} PARTS)` : `3D SOURCE VIEWER - FULL SCREEN MODE (${selectedPart?.name})`}
+              </span>
             </div>
             <button
               onClick={() => setFullScreenView(null)}
-              className="px-4 py-2 bg-industrial-card hover:bg-industrial-border border border-industrial-border rounded font-bold transition text-industrial-text hover:text-white cursor-pointer"
-              title="Close Full Screen View"
+              className="px-3.5 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded font-bold transition flex items-center gap-1.5 shadow-md cursor-pointer text-xs"
+              title="Close Full Screen View (ESC)"
             >
-              Exit Full Screen (ESC)
+              <span className="font-extrabold text-sm">✕</span> Exit Full Screen
             </button>
           </div>
           <div className="flex-1 min-h-0 relative">
             <Model3DViewer 
+              onToggleFullScreen={() => setFullScreenView(null)}
               parts={viewerParts} 
               combinedView={combined3D} 
               activeFace={selectedPart?.baseFace || null}
               faces={selectedPart?.faces || []}
               hoveredFaceName={hoveredFaceName}
-              onFaceClick={(faceName) => {
-                if (selectedPart) {
-                  handleFaceClickWrapper(selectedPart.id, faceName);
-                }
-              }}
+              onFaceClick={(faceName) => selectedPart && handleUpdatePartBaseFace(selectedPart.id, faceName)}
               onFaceHover={setHoveredFaceName}
+              onSetBaseFace={(faceName) => selectedPart && handleSetSoleBaseFace(selectedPart.id, faceName)}
+              onAddBaseFace={(faceName) => selectedPart && handleUpdatePartBaseFace(selectedPart.id, faceName)}
+              onRemoveBaseFace={(faceName) => selectedPart && handleUpdatePartBaseFace(selectedPart.id, faceName)}
+              onClearBaseFace={() => selectedPart && handleClearBaseFaces(selectedPart.id)}
+              onSelectPart={(partId) => setSelectedPartId(partId)}
+              selectedPartId={selectedPartId}
               themeMode={themeMode}
             />
           </div>
         </div>
       )}
 
-      {fullScreenView === 'flat' && selectedPart && (
-        <div className="fixed inset-0 z-50 bg-industrial-bg/95 flex flex-col p-6 font-mono text-xs">
-          <div className="flex items-center justify-between border-b border-industrial-border pb-3 mb-4 shrink-0">
+      {fullScreenView === 'flat' && (parts.length > 0 || selectedPart) && (
+        <div className="fixed inset-0 z-[100] bg-industrial-bg w-screen h-screen flex flex-col p-4 font-mono text-xs overflow-hidden">
+          <div className="flex items-center justify-between border-b border-industrial-border pb-3 mb-3 shrink-0">
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 bg-industrial-orange rounded-full animate-ping"></span>
-              <span className="font-bold text-sm text-industrial-orange uppercase tracking-wider">FLAT PREVIEWER - FULL SCREEN MODE</span>
-              <span className="text-industrial-muted">({selectedPart.name} - Est. Thickness: {selectedPart.thickness.toFixed(1)}mm)</span>
+              <span className="font-bold text-sm text-industrial-orange uppercase tracking-wider">
+                {combinedFlat ? `2D COMBINED FLAT SCENE - FULL SCREEN MODE (${parts.length} BLANKS)` : `FLAT PREVIEWER - FULL SCREEN MODE (${selectedPart?.name})`}
+              </span>
             </div>
             <button
               onClick={() => setFullScreenView(null)}
-              className="px-4 py-2 bg-industrial-card hover:bg-industrial-border border border-industrial-border rounded font-bold transition text-industrial-text hover:text-white cursor-pointer"
-              title="Close Full Screen View"
+              className="px-3.5 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded font-bold transition flex items-center gap-1.5 shadow-md cursor-pointer text-xs"
+              title="Close Full Screen View (ESC)"
             >
-              Exit Full Screen (ESC)
+              <span className="font-extrabold text-sm">✕</span> Exit Full Screen
             </button>
           </div>
           <div className="flex-1 min-h-0 relative">
-            {(() => {
-              const activeFe = selectedPart?.flatElements?.find(fe => fe.id === selectedFlatElementId) || selectedPart?.flatElements?.[0] || null;
-              return (
-                <FlatPreviewer 
-                  svgContent={activeFe ? activeFe.svgContent || null : null} 
-                  baseFace={activeFe ? activeFe.baseFace : null} 
-                  thickness={selectedPart.thickness} 
-                  onRemoveComponent={(faceName) => {
-                    handleUpdatePartBaseFace(selectedPart.id, faceName);
-                    setSelectedFlatElementId(null);
+            {combinedFlat ? (
+              <FlatPreviewer 
+                svgContent={combinedSvgContent} 
+                baseFace="Combined Flat Scene" 
+                thickness={parts[0]?.thickness || 2.0} 
+                onToggleFullScreen={() => setFullScreenView(null)}
+                themeMode={themeMode}
+              />
+            ) : selectedPart ? (
+              <FlatPreviewer 
+                svgContent={selectedPart.flatElements?.find(fe => fe.id === selectedFlatElementId)?.svgContent || selectedPart.flatElements?.[0]?.svgContent || null} 
+                baseFace={selectedPart.flatElements?.find(fe => fe.id === selectedFlatElementId)?.baseFace || selectedPart.flatElements?.[0]?.baseFace || null} 
+                thickness={selectedPart.thickness} 
+                onToggleFullScreen={() => setFullScreenView(null)}
+                onRemoveComponent={(faceName) => {
+                  handleUpdatePartBaseFace(selectedPart.id, faceName);
+                  setSelectedFlatElementId(null);
+                }}
+                themeMode={themeMode}
+              />
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* Advanced Settings Modal */}
+      {showAdvancedModal && (
+        <div className="fixed inset-0 z-[110] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 font-mono text-xs animate-fade-in select-none">
+          <div className="bg-industrial-card border border-industrial-border rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col gap-5 text-left">
+            <div className="flex items-center justify-between border-b border-industrial-border pb-3">
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-sm text-industrial-accent uppercase tracking-wider flex items-center gap-2">
+                  ⚙️ ADVANCED FLATTENING & K-FACTOR CONFIG
+                </span>
+              </div>
+              <button
+                onClick={() => setShowAdvancedModal(false)}
+                className="text-industrial-muted hover:text-white text-lg font-bold px-2 py-0.5 rounded transition cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-4">
+              {/* CAD System Presets Selection */}
+              <div className="flex flex-col gap-2 bg-industrial-darker/70 p-3 rounded border border-industrial-border">
+                <span className="font-bold text-industrial-accent text-xs">CAD Software & Standard Presets:</span>
+                <select
+                  value={selectedPart?.kFactorPreset || 'solidworks_default'}
+                  disabled={isAnalyzing || isUnfolding || isNesting}
+                  onChange={(e) => handleSelectKFactorMode('preset', e.target.value)}
+                  className="w-full bg-industrial-dark border border-industrial-border px-2 py-1.5 rounded text-xs font-mono text-industrial-text focus:border-industrial-accent outline-none cursor-pointer"
+                >
+                  {CAD_PRESETS_CATALOG.map(p => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} (K = {p.value.toFixed(6)})
+                    </option>
+                  ))}
+                </select>
+                {selectedPart?.kFactorPreset && (
+                  <span className="text-[10px] text-industrial-muted italic">
+                    {CAD_PRESETS_CATALOG.find(p => p.id === selectedPart.kFactorPreset)?.description}
+                  </span>
+                )}
+              </div>
+
+              {/* PTC Creo Y-Factor Interactive Converter */}
+              <div className="flex flex-col gap-2 bg-industrial-darker/70 p-3 rounded border border-industrial-border">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-industrial-text text-xs">PTC Creo Y-Factor Converter:</span>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min="0.10"
+                      max="1.50"
+                      step="0.0001"
+                      placeholder="e.g. 0.5000"
+                      value={selectedPart?.yFactor ?? 0.5000}
+                      disabled={isAnalyzing || isUnfolding || isNesting}
+                      onChange={(e) => handleSelectKFactorMode('y_factor', Number(e.target.value))}
+                      className="w-24 px-1.5 py-0.5 text-xs text-center font-mono bg-industrial-dark border border-industrial-border rounded text-industrial-accent font-bold outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSelectKFactorMode('y_factor', selectedPart?.yFactor ?? 0.5000)}
+                      className="px-2 py-0.5 bg-industrial-accent text-industrial-bg rounded text-[10px] font-bold cursor-pointer"
+                    >
+                      APPLY Y
+                    </button>
+                  </div>
+                </div>
+                <span className="text-[10px] text-industrial-muted italic">
+                  Formula: K = Y × (2 / π). (e.g. Creo Y = 0.500000 → K = 0.318310).
+                </span>
+              </div>
+
+              {/* K-Factor Setting with 6-decimal precision */}
+              <div className="flex flex-col gap-2">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-industrial-text">Exact Neutral Axis K-Factor:</span>
+                  <input
+                    type="number"
+                    min="0.10"
+                    max="0.90"
+                    step="0.000001"
+                    value={selectedPart ? selectedPart.kfactor : (parts[0]?.kfactor ?? 0.44)}
+                    disabled={isAnalyzing || isUnfolding || isNesting}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      if (selectedPart) {
+                        handleUpdatePartKfactor(selectedPart.id, val);
+                      } else {
+                        setParts(prev => prev.map(p => ({ ...p, kfactor: val })));
+                      }
+                    }}
+                    className="w-28 px-1.5 py-0.5 text-xs text-center font-mono bg-industrial-darker border border-industrial-border rounded text-industrial-accent font-bold outline-none"
+                  />
+                </div>
+                <input
+                  type="range"
+                  min="0.10"
+                  max="0.90"
+                  step="0.0001"
+                  value={selectedPart ? selectedPart.kfactor : (parts[0]?.kfactor ?? 0.44)}
+                  disabled={isAnalyzing || isUnfolding || isNesting}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    if (selectedPart) {
+                      handleUpdatePartKfactor(selectedPart.id, val);
+                    } else {
+                      setParts(prev => prev.map(p => ({ ...p, kfactor: val })));
+                    }
                   }}
-                  themeMode={themeMode}
+                  className="w-full h-1.5 bg-industrial-darker rounded-lg appearance-none cursor-pointer accent-industrial-accent"
                 />
-              );
-            })()}
+                <span className="text-[10px] text-industrial-muted italic leading-relaxed">
+                  Specifies the exact neutral bending line ratio (t/T) up to 6 decimal places to eliminate human typing error.
+                </span>
+              </div>
+
+              {/* Mirror Flat Pattern Toggle */}
+              <div className="flex flex-col gap-2 pt-3 border-t border-industrial-border/60">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-industrial-text">Mirror Flat DXF Output:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedPart) {
+                        setParts(prev => prev.map(p => p.id === selectedPart.id ? { ...p, mirror: !p.mirror } : p));
+                      } else {
+                        setParts(prev => prev.map(p => ({ ...p, mirror: !p.mirror })));
+                      }
+                    }}
+                    className={`px-3 py-1 rounded text-xs font-bold font-mono transition cursor-pointer ${
+                      (selectedPart?.mirror ?? false)
+                        ? 'bg-industrial-accent text-industrial-bg shadow-sm'
+                        : 'bg-industrial-darker border border-industrial-border text-industrial-muted'
+                    }`}
+                  >
+                    {(selectedPart?.mirror ?? false) ? 'MIRRORED (ON)' : 'STANDARD (OFF)'}
+                  </button>
+                </div>
+                <span className="text-[10px] text-industrial-muted italic leading-relaxed">
+                  Flips the flat pattern orientation across the Y axis for bottom-side laser cutting or reverse press brake bending.
+                </span>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-industrial-border">
+              <button
+                type="button"
+                onClick={() => setShowAdvancedModal(false)}
+                className="px-5 py-2 bg-industrial-accent hover:bg-industrial-accent/90 text-industrial-bg font-bold rounded text-xs transition cursor-pointer shadow-md"
+              >
+                DONE / CLOSE SETTINGS
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {fullScreenView === 'nesting' && nestingSvg && (
-        <div className="fixed inset-0 z-50 bg-industrial-bg/95 flex flex-col p-6 font-mono text-xs">
-          <div className="flex items-center justify-between border-b border-industrial-border pb-3 mb-4 shrink-0">
+        <div className="fixed inset-0 z-[100] bg-industrial-bg w-screen h-screen flex flex-col p-4 font-mono text-xs overflow-hidden">
+          <div className="flex items-center justify-between border-b border-industrial-border pb-3 mb-3 shrink-0">
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 bg-industrial-accent rounded-full animate-ping"></span>
@@ -4199,19 +5268,20 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
             </div>
             <button
               onClick={() => setFullScreenView(null)}
-              className="px-4 py-2 bg-industrial-card hover:bg-industrial-border border border-industrial-border rounded font-bold transition text-industrial-text hover:text-white cursor-pointer"
-              title="Close Full Screen View"
+              className="px-3.5 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded font-bold transition flex items-center gap-1.5 shadow-md cursor-pointer text-xs"
+              title="Close Full Screen View (ESC)"
             >
-              Exit Full Screen (ESC)
+              <span className="font-extrabold text-sm">✕</span> Exit Full Screen
             </button>
           </div>
           <div className="flex-1 min-h-0 relative">
             <FlatPreviewer 
               svgContent={nestingSvg} 
-              baseFace={null} 
-              thickness={0} 
-              is3dView={true} 
-              title={`2D Nested Layout`}
+              baseFace="Combined Sheet Layout" 
+              thickness={parts[0]?.thickness || 2.0} 
+              is3dView={false}
+              title={`Nesting Sheet ${activeSheetIndex + 1} (${nestingUtilization}% Eff.)`}
+              onToggleFullScreen={() => setFullScreenView(null)}
               themeMode={themeMode}
             />
           </div>
@@ -4404,12 +5474,15 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
                   onClick={async () => {
                     const targetSheet = nestedSheets[exportSelectedSheetIdx] || { dxfPath: nestingDxfPath, pdfPath: nestingPdfPath, gcodePath: nestingGcodePath };
                     if (targetSheet.dxfPath) {
+                      const matClean = (((targetSheet as any).material || 'Mild_Steel') as string).replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+                      const thickClean = `${(targetSheet as any).thickness || 2.0}mm`;
+                      const defaultName = `Cadanest_${matClean}_${thickClean}_Sheet_${exportSelectedSheetIdx + 1}_of_${nestedSheets.length}_${sheetWidth}x${sheetHeight}mm.dxf`;
                       await window.electronAPI.saveFileAs({
                         sourcePath: targetSheet.dxfPath,
-                        defaultFilename: `Sheet_${exportSelectedSheetIdx + 1}_Nested.dxf`
+                        defaultFilename: defaultName
                       });
                       setShowExportMenu(false);
-                      addLog(`✓ Exported Sheet ${exportSelectedSheetIdx + 1} DXF successfully.`);
+                      addLog(`✓ Exported ${defaultName} successfully.`);
                     }
                   }}
                   className="px-4 py-2 bg-industrial-accent hover:bg-industrial-accent/80 text-industrial-bg font-bold rounded transition cursor-pointer flex items-center gap-1.5 shadow-md"
@@ -4423,14 +5496,17 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
                       for (let i = 0; i < nestedSheets.length; i++) {
                         const s = nestedSheets[i];
                         if (s.dxfPath) {
+                          const matClean = (((s as any).material || 'Mild_Steel') as string).replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+                          const thickClean = `${(s as any).thickness || 2.0}mm`;
+                          const defaultName = `Cadanest_${matClean}_${thickClean}_Sheet_${i + 1}_of_${nestedSheets.length}_${sheetWidth}x${sheetHeight}mm.dxf`;
                           await window.electronAPI.saveFileAs({
                             sourcePath: s.dxfPath,
-                            defaultFilename: `Sheet_${i + 1}_Nested.dxf`
+                            defaultFilename: defaultName
                           });
                         }
                       }
                       setShowExportMenu(false);
-                      addLog(`✓ Exported all ${nestedSheets.length} sheets successfully.`);
+                      addLog(`✓ Exported all ${nestedSheets.length} sheets successfully with standard filenames.`);
                     }}
                     className="px-4 py-2 bg-industrial-orange hover:bg-industrial-orange/90 text-white font-bold rounded transition cursor-pointer flex items-center gap-1.5 shadow-md"
                   >
@@ -4438,6 +5514,230 @@ Bend Allowance (BA) = (π / 180) × Angle × (Radius + K-Factor × Thickness)
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pre-Flatten Settings Modal */}
+      {showPreFlattenModal && selectedPart && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-industrial-card border border-industrial-border rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
+            <div className="bg-industrial-darker px-5 py-4 border-b border-industrial-border flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="p-1.5 bg-industrial-orange/20 border border-industrial-orange/30 rounded text-industrial-orange font-bold text-xs">⚡</span>
+                <div>
+                  <h3 className="text-sm font-bold text-industrial-text font-mono">Pre-Flatten Unfolding Settings</h3>
+                  <p className="text-[10px] text-industrial-muted">Configure bend style and hole parameters for {selectedPart.name}</p>
+                </div>
+              </div>
+              <button onClick={() => setShowPreFlattenModal(false)} className="text-industrial-muted hover:text-white p-1 transition cursor-pointer">&times;</button>
+            </div>
+
+            <div className="p-5 flex flex-col gap-4 text-xs font-mono">
+              {/* 1. Bend Line Style Selection */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-bold text-industrial-text">Bend Line Style:</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { id: 'dashed', label: 'Dotted & Dashed Centerline (Default)', desc: 'Standard dash-dot centerline' },
+                    { id: 'tick', label: 'Etch Tick Markers', desc: 'Customizable etch markers' }
+                  ].map(style => (
+                    <button
+                      key={style.id}
+                      onClick={() => {
+                        setBendStyle(style.id);
+                        if (selectedPart) {
+                          setParts(prev => prev.map(p => p.id === selectedPart.id ? { ...p, bendStyle: style.id } : p));
+                        }
+                      }}
+                      className={`p-2.5 rounded border text-left flex flex-col transition cursor-pointer ${
+                        bendStyle === style.id 
+                          ? 'bg-industrial-accent/15 border-industrial-accent text-industrial-accent font-bold' 
+                          : 'bg-industrial-darker border-industrial-border/60 text-industrial-muted hover:text-white'
+                      }`}
+                    >
+                      <span className="text-[11px] font-bold">{style.label}</span>
+                      <span className="text-[9px] opacity-75">{style.desc}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Sub-controls when Etch Tick Markers selected */}
+                {bendStyle === 'tick' && (
+                  <div className="mt-2 p-3 bg-industrial-darker/80 border border-industrial-border/80 rounded-lg flex flex-col gap-3">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-bold text-industrial-text">Etch Marker Position Strategy:</label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEtchMarkerPosition('interior');
+                            if (selectedPart) {
+                              setParts(prev => prev.map(p => p.id === selectedPart.id ? { ...p, etchMarkerPosition: 'interior' } : p));
+                            }
+                          }}
+                          className={`px-2.5 py-1.5 rounded border text-left text-[10px] flex flex-col cursor-pointer transition ${
+                            (selectedPart?.etchMarkerPosition || etchMarkerPosition) === 'interior'
+                              ? 'bg-industrial-accent/20 border-industrial-accent text-industrial-accent font-bold'
+                              : 'bg-industrial-card border-industrial-border text-industrial-muted hover:text-white'
+                          }`}
+                        >
+                          <span className="font-bold">Interior Centered</span>
+                          <span className="text-[9px] opacity-75">1-2 ticks far from corners</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEtchMarkerPosition('boundary');
+                            if (selectedPart) {
+                              setParts(prev => prev.map(p => p.id === selectedPart.id ? { ...p, etchMarkerPosition: 'boundary' } : p));
+                            }
+                          }}
+                          className={`px-2.5 py-1.5 rounded border text-left text-[10px] flex flex-col cursor-pointer transition ${
+                            (selectedPart?.etchMarkerPosition || etchMarkerPosition) === 'boundary'
+                              ? 'bg-industrial-accent/20 border-industrial-accent text-industrial-accent font-bold'
+                              : 'bg-industrial-card border-industrial-border text-industrial-muted hover:text-white'
+                          }`}
+                        >
+                          <span className="font-bold">Boundary Ends</span>
+                          <span className="text-[9px] opacity-75">Ticks at line endpoints</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <span className="font-bold text-industrial-text">Etch Marker Segment Length:</span>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            step="0.5"
+                            min="1.0"
+                            max="15.0"
+                            value={selectedPart?.etchMarkerLength || etchMarkerLength}
+                            onChange={e => {
+                              const val = Math.max(1.0, Math.min(15.0, parseFloat(e.target.value) || 4.5));
+                              setEtchMarkerLength(val);
+                              if (selectedPart) {
+                                setParts(prev => prev.map(p => p.id === selectedPart.id ? { ...p, etchMarkerLength: val } : p));
+                              }
+                            }}
+                            className="w-14 h-5 px-1 bg-industrial-card border border-industrial-border rounded text-center text-industrial-text font-bold text-[10px]"
+                          />
+                          <span className="text-industrial-muted">mm</span>
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min="1.0"
+                        max="15.0"
+                        step="0.5"
+                        value={selectedPart?.etchMarkerLength || etchMarkerLength}
+                        onChange={e => {
+                          const val = parseFloat(e.target.value);
+                          setEtchMarkerLength(val);
+                          if (selectedPart) {
+                            setParts(prev => prev.map(p => p.id === selectedPart.id ? { ...p, etchMarkerLength: val } : p));
+                          }
+                        }}
+                        className="w-full accent-industrial-accent h-1.5 bg-industrial-border rounded-lg cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Dimple Hole Layering Config */}
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-industrial-border/50">
+                <label className="text-[11px] font-bold text-industrial-text">Dimple & Countersink Hole Output:</label>
+                <label className="flex items-center gap-2 p-2 bg-industrial-darker border border-industrial-border/60 rounded cursor-pointer hover:border-industrial-accent/40">
+                  <input
+                    type="checkbox"
+                    checked={exportMinimalDimpleHoles}
+                    onChange={e => setExportMinimalDimpleHoles(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-industrial-accent rounded cursor-pointer"
+                  />
+                  <div className="flex flex-col">
+                    <span className="font-bold text-industrial-text text-[11px]">Prefer Smaller Pilot Hole Diameter (Default)</span>
+                    <span className="text-[9px] text-industrial-muted">Outputs minimal pilot laser cut diameter on FORMING_FEATURES layer</span>
+                  </div>
+                </label>
+              </div>
+
+              {/* 3. K-Factor Parameter Slider */}
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-industrial-border/50">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="font-bold text-industrial-text">K-Factor Parameter:</span>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0.05"
+                    max="0.95"
+                    value={selectedPart.kfactor}
+                    onChange={(e) => handleUpdatePartKfactor(selectedPart.id, Number(e.target.value))}
+                    className="w-20 px-1 py-0.5 text-xs text-center font-mono bg-industrial-darker border border-industrial-border rounded text-industrial-accent font-bold"
+                  />
+                </div>
+                <input
+                  type="range"
+                  min="0.10"
+                  max="0.80"
+                  step="0.001"
+                  value={selectedPart.kfactor}
+                  onChange={e => handleUpdatePartKfactor(selectedPart.id, parseFloat(e.target.value))}
+                  className="w-full accent-industrial-accent cursor-pointer"
+                />
+              </div>
+
+              {/* 4. Mirror Flat Pattern & Part-in-Part Hole Nesting */}
+              <div className="flex items-center justify-between pt-2 border-t border-industrial-border/50">
+                <span className="text-[11px] font-bold text-industrial-text">Mirror Flat Pattern:</span>
+                <button
+                  onClick={() => {
+                    setParts(prev => prev.map(p => p.id === selectedPart.id ? { ...p, mirror: !p.mirror } : p));
+                  }}
+                  className={`px-3 py-1 text-[10px] font-bold rounded border transition cursor-pointer ${
+                    selectedPart.mirror 
+                      ? 'bg-industrial-orange/20 border-industrial-orange text-industrial-orange' 
+                      : 'bg-industrial-darker border-industrial-border text-industrial-muted'
+                  }`}
+                >
+                  {selectedPart.mirror ? 'MIRRORED (ON)' : 'STANDARD (OFF)'}
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-industrial-border/50">
+                <span className="text-[11px] font-bold text-industrial-text">Part-in-Part Hole Nesting:</span>
+                <button
+                  onClick={() => setAllowPartInPart(prev => !prev)}
+                  className={`px-3 py-1 text-[10px] font-bold rounded border transition cursor-pointer ${
+                    allowPartInPart 
+                      ? 'bg-industrial-accent/20 border-industrial-accent text-industrial-accent' 
+                      : 'bg-industrial-darker border-industrial-border text-industrial-muted'
+                  }`}
+                >
+                  {allowPartInPart ? 'ENABLED (ON)' : 'DISABLED (OFF)'}
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-industrial-darker px-5 py-3 border-t border-industrial-border flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowPreFlattenModal(false)}
+                className="px-4 py-1.5 bg-industrial-card hover:bg-industrial-border border border-industrial-border text-industrial-muted hover:text-white font-bold rounded transition cursor-pointer text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  setShowPreFlattenModal(false);
+                  await handleRunUnfold();
+                }}
+                className="px-4 py-1.5 bg-industrial-orange hover:bg-industrial-orange/90 text-white font-bold rounded transition cursor-pointer text-xs flex items-center gap-1.5 shadow-md"
+              >
+                <Play size={13} /> Confirm & Flatten Model
+              </button>
             </div>
           </div>
         </div>

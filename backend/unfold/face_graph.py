@@ -1,11 +1,16 @@
 from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
-from OCC.Core.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder
-from OCC.Core.BRepGProp import brepgprop
+from OCC.Core.GeomAbs import (
+    GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Torus,
+    GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_SurfaceOfRevolution,
+    GeomAbs_SurfaceOfExtrusion
+)
+from OCC.Core.BRepGProp import brepgprop, BRepGProp_Face
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 from OCC.Core.TopExp import topexp
 from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE
 from OCC.Core.TopoDS import topods
+from OCC.Core.gp import gp_Pnt, gp_Vec
 import numpy as np
 
 def get_face_area(face) -> float:
@@ -27,7 +32,7 @@ def get_face_center(face):
 
 def classify_face(face):
     """
-    Classifies a face as PLANE, CYLINDER, or UNKNOWN.
+    Classifies a face as PLANE, CYLINDER, CONE, TORUS, BSPLINE, or UNKNOWN with topological metadata.
     """
     adaptor = BRepAdaptor_Surface(face)
     stype = adaptor.GetType()
@@ -48,15 +53,70 @@ def classify_face(face):
     elif stype == GeomAbs_Cylinder:
         cyl = adaptor.Cylinder()
         radius = cyl.Radius()
+        u_span = abs(adaptor.LastUParameter() - adaptor.FirstUParameter())
+
+        # Fast-path perforated holes (full 360-degree small cylindrical cutouts)
+        if radius < 12.0 and u_span >= 6.0:
+            return {
+                "type": "HOLE_CYLINDER",
+                "radius": radius,
+                "area": 0.0,
+                "is_inner": True
+            }
+
         axis = cyl.Position().Axis()
         dir_vec = axis.Direction()
         loc = axis.Location()
+
+        u_mid = (adaptor.FirstUParameter() + adaptor.LastUParameter()) / 2.0
+        v_mid = (adaptor.FirstVParameter() + adaptor.LastVParameter()) / 2.0
+        p_surf = gp_Pnt()
+        n_surf = gp_Vec()
+        BRepGProp_Face(face).Normal(u_mid, v_mid, p_surf, n_surf)
+
+        axis_dir_vec = gp_Vec(dir_vec.X(), dir_vec.Y(), dir_vec.Z())
+        to_surf = gp_Vec(loc, p_surf)
+        radial_vec = to_surf - axis_dir_vec.Multiplied(to_surf.Dot(axis_dir_vec))
+        is_inner = radial_vec.Dot(n_surf) < 0.0
+
         return {
             "type": "CYLINDER",
             "radius": radius,
             "axis_dir": (dir_vec.X(), dir_vec.Y(), dir_vec.Z()),
             "axis_loc": (loc.X(), loc.Y(), loc.Z()),
-            "area": area
+            "area": area,
+            "is_inner": is_inner
+        }
+    elif stype == GeomAbs_Cone:
+        cone = adaptor.Cone()
+        semi_angle = cone.SemiAngle()
+        ref_radius = cone.RefRadius()
+        axis = cone.Position().Axis()
+        dir_vec = axis.Direction()
+        loc = axis.Location()
+        return {
+            "type": "CONE",
+            "semi_angle": semi_angle,
+            "radius": ref_radius,
+            "axis_dir": (dir_vec.X(), dir_vec.Y(), dir_vec.Z()),
+            "axis_loc": (loc.X(), loc.Y(), loc.Z()),
+            "area": area,
+            "is_inner": True
+        }
+    elif stype in (GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_SurfaceOfRevolution, GeomAbs_SurfaceOfExtrusion):
+        return {
+            "type": "MICRO_WALL_SURFACE",
+            "area": area,
+            "is_inner": True
+        }
+    elif stype == GeomAbs_Torus:
+        torus = adaptor.Torus()
+        return {
+            "type": "TORUS",
+            "major_radius": torus.MajorRadius(),
+            "minor_radius": torus.MinorRadius(),
+            "area": area,
+            "is_inner": True
         }
     else:
         return {
@@ -121,3 +181,33 @@ def build_face_adjacency_graph(shape, faces_list):
                     "edge": edge
                 })
     return adj
+
+
+def is_sheet_metal_part(classification_list: list) -> bool:
+    """
+    Topology screening heuristic: determines whether a 3D model is a sheet metal component
+    vs solid block, casting, bolt, or non-developable object.
+    Checks for:
+    - Dominance of PLANE and CYLINDER faces.
+    - Lack of complex non-developable surface geometries.
+    """
+    if not classification_list or len(classification_list) < 3:
+        return False
+
+    planes = [c for c in classification_list if c["type"] == "PLANE"]
+    cylinders = [c for c in classification_list if c["type"] in ("CYLINDER", "HOLE_CYLINDER")]
+    unknowns = [c for c in classification_list if c["type"] == "UNKNOWN"]
+
+    # Disqualify if unknown/complex non-developable surfaces dominate total area
+    total_area = sum(c.get("area", 0.0) for c in classification_list)
+    if total_area > 0:
+        unknown_area = sum(c.get("area", 0.0) for c in unknowns)
+        if (unknown_area / total_area) > 0.20:
+            return False
+
+    # A valid sheet metal blank must have at least 2 planar faces for front & back sheet flanges
+    if len(planes) < 2:
+        return False
+
+    return True
+

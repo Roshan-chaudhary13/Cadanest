@@ -1,24 +1,26 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const electron_1 = require("electron");
-electron_1.contextBridge.exposeInMainWorld('electronAPI', {
-    selectFile: () => electron_1.ipcRenderer.invoke('select-file'),
-    getStlData: (filePath) => electron_1.ipcRenderer.invoke('get-stl-data', filePath),
-    cancelProcess: () => electron_1.ipcRenderer.invoke('cancel-process'),
-    runAnalyze: (stepPath) => electron_1.ipcRenderer.invoke('run-analyze', stepPath),
-    parseDxf: (dxfPath) => electron_1.ipcRenderer.invoke('parse-dxf', dxfPath),
-    parseCadAssembly: (filePath) => electron_1.ipcRenderer.invoke('parse-cad-assembly', filePath),
-    runUnfold: (args) => electron_1.ipcRenderer.invoke('run-unfold', args),
-    runBatchStep: (args) => electron_1.ipcRenderer.invoke('run-batch-step', args),
-    clearCache: () => electron_1.ipcRenderer.invoke('clear-cache'),
-    runNesting: (args) => electron_1.ipcRenderer.invoke('run-nesting', args),
-    openFile: (filePath) => electron_1.ipcRenderer.invoke('open-file', filePath),
-    saveFileAs: (args) => electron_1.ipcRenderer.invoke('save-file-as', args),
+import { contextBridge, ipcRenderer } from 'electron';
+contextBridge.exposeInMainWorld('electronAPI', {
+    selectFile: () => ipcRenderer.invoke('select-file'),
+    getStlData: (filePath) => ipcRenderer.invoke('get-stl-data', filePath),
+    cancelProcess: () => ipcRenderer.invoke('cancel-process'),
+    runAnalyze: (stepPath, originalPath) => ipcRenderer.invoke('run-analyze', stepPath, originalPath),
+    runAnalyzeBatch: (items) => ipcRenderer.invoke('run-analyze-batch', items),
+    parseDxf: (dxfPath) => ipcRenderer.invoke('parse-dxf', dxfPath),
+    parseCadAssembly: (filePath) => ipcRenderer.invoke('parse-cad-assembly', filePath),
+    parseCadAssemblyBatch: (filePath) => ipcRenderer.invoke('parse-cad-assembly-batch', filePath),
+    runUnfold: (args) => ipcRenderer.invoke('run-unfold', args),
+    runUnfoldBatch: (items) => ipcRenderer.invoke('run-unfold-batch', items),
+    runBatchStep: (args) => ipcRenderer.invoke('run-batch-step', args),
+    clearCache: () => ipcRenderer.invoke('clear-cache'),
+    runNesting: (args) => ipcRenderer.invoke('run-nesting', args),
+    calibrateKFactor: (args) => ipcRenderer.invoke('calibrate-kfactor', args),
+    openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
+    saveFileAs: (args) => ipcRenderer.invoke('save-file-as', args),
     onNestingProgress: (callback) => {
         const listener = (_event, data) => callback(data);
-        electron_1.ipcRenderer.on('nesting-progress', listener);
+        ipcRenderer.on('nesting-progress', listener);
         return () => {
-            electron_1.ipcRenderer.removeListener('nesting-progress', listener);
+            ipcRenderer.removeListener('nesting-progress', listener);
         };
     }
 });

@@ -2,16 +2,37 @@ import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import path from 'path';
 import { spawn } from 'child_process';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { DaemonClient } from './daemon_client.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let mainWindow: BrowserWindow | null = null;
 const activeProcesses: Map<string, any> = new Map();
+
+// Force high-performance GPU hardware acceleration & WebGL performance in Electron
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('high-performance-gpu');
+app.commandLine.appendSwitch('gpu-accelerated-canvas2d');
+app.commandLine.appendSwitch('enable-native-gpu-memory-buffers');
+
+let pythonPath = 'C:\\Program Files\\FreeCAD 1.1\\bin\\python.exe';
+const portablePython = path.join(__dirname, '../../FreeCAD_1.1.1-Windows-x86_64-py311/bin/python.exe');
+if (fs.existsSync(portablePython)) {
+  pythonPath = portablePython;
+}
+const daemonScriptPath = path.join(__dirname, '../backend/daemon.py');
+const daemonClient = new DaemonClient(pythonPath, daemonScriptPath);
 
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
     },
@@ -19,6 +40,9 @@ function createWindow() {
     autoHideMenuBar: true,
     backgroundColor: '#0F1016',
   });
+
+  daemonClient.setMainWindow(mainWindow);
+  daemonClient.start();
 
   const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production';
 
@@ -30,6 +54,7 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    daemonClient.setMainWindow(null);
   });
 }
 
@@ -45,8 +70,12 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('will-quit', () => {
-  console.log('Cadanest exiting: terminating background child processes...');
+app.on('will-quit', async () => {
+  console.log('Cadanest exiting: wiping session cache & terminating background processes...');
+  try {
+    await daemonClient.sendRequest('clear_cache', {});
+  } catch (e) {}
+  daemonClient.stop();
   for (const [pid, proc] of activeProcesses.entries()) {
     try {
       proc.kill();
@@ -55,16 +84,6 @@ app.on('will-quit', () => {
   }
   activeProcesses.clear();
 });
-
-let pythonPath = 'C:\\Program Files\\FreeCAD 1.1\\bin\\python.exe';
-const portablePython = path.join(__dirname, '../../FreeCAD_1.1.1-Windows-x86_64-py311/bin/python.exe');
-if (fs.existsSync(portablePython)) {
-  pythonPath = portablePython;
-}
-const scriptPath = path.join(__dirname, '../backend/unfolder.py');
-const nesterScriptPath = path.join(__dirname, '../backend/nester.py');
-const batchScriptPath = path.join(__dirname, '../backend/batch_processor.py');
-const solidBridgePath = path.join(__dirname, '../backend/solid_edge_bridge.py');
 
 // IPC Handler for file selection (supporting MULTIPLE selections)
 ipcMain.handle('select-file', async () => {
@@ -88,78 +107,34 @@ ipcMain.handle('select-file', async () => {
 
 // IPC Handler to parse direct DXF files
 ipcMain.handle('parse-dxf', async (_event, dxfPath: string) => {
-  return new Promise((resolve) => {
-    const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-    const exportsDir = path.join(desktopPath, 'exports');
-    if (!fs.existsSync(exportsDir)) {
-      fs.mkdirSync(exportsDir, { recursive: true });
-    }
-    const baseName = path.basename(dxfPath, path.extname(dxfPath));
-    const svgPreviewOut = path.join(exportsDir, `${baseName}_preview.svg`);
-    const cmdArgs = [scriptPath, 'parse_dxf', dxfPath, svgPreviewOut];
-
-    console.log(`Spawning DXF Parse: "${pythonPath}" ${cmdArgs.join(' ')}`);
-    const child = spawn(pythonPath, cmdArgs);
-    let stdoutData = '';
-    let stderrData = '';
-
-    child.stdout.on('data', (d) => stdoutData += d.toString());
-    child.stderr.on('data', (d) => stderrData += d.toString());
-
-    child.on('close', (code) => {
-      if (code !== 0) {
-        resolve({ status: 'error', error: `DXF parse failed: ${stderrData || 'Unknown error'}` });
-        return;
-      }
-      try {
-        const jsonMatch = stdoutData.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          resolve(JSON.parse(jsonMatch[0]));
-        } else {
-          resolve({ status: 'error', error: 'Invalid response from DXF parser script' });
-        }
-      } catch (err: any) {
-        resolve({ status: 'error', error: `Failed to parse DXF JSON: ${err.message}` });
-      }
-    });
-  });
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  const baseName = path.basename(dxfPath, path.extname(dxfPath));
+  const svgPreviewOut = path.join(exportsDir, `${baseName}_preview.svg`);
+  return daemonClient.sendRequest('parse_dxf', { dxfPath, svgPreviewOut });
 });
 
 // IPC Handler to parse Solid Edge & CAD assembly files (.asm, .psm, .par, .sldprt, .sldasm)
 ipcMain.handle('parse-cad-assembly', async (_event, filePath: string) => {
-  return new Promise((resolve) => {
-    const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-    const exportsDir = path.join(desktopPath, 'exports');
-    if (!fs.existsSync(exportsDir)) {
-      fs.mkdirSync(exportsDir, { recursive: true });
-    }
-    const cmdArgs = [solidBridgePath, filePath, exportsDir];
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  return daemonClient.sendRequest('parse_cad_assembly', { filePath, exportDir: exportsDir });
+});
 
-    console.log(`Spawning CAD Assembly Bridge: "${pythonPath}" ${cmdArgs.join(' ')}`);
-    const child = spawn(pythonPath, cmdArgs);
-    let stdoutData = '';
-    let stderrData = '';
-
-    child.stdout.on('data', (d) => stdoutData += d.toString());
-    child.stderr.on('data', (d) => stderrData += d.toString());
-
-    child.on('close', (code) => {
-      if (code !== 0) {
-        resolve({ status: 'error', error: `CAD Assembly parse failed: ${stderrData || 'Unknown error'}` });
-        return;
-      }
-      try {
-        const jsonMatch = stdoutData.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          resolve(JSON.parse(jsonMatch[0]));
-        } else {
-          resolve({ status: 'error', error: 'Invalid response from CAD assembly bridge' });
-        }
-      } catch (err: any) {
-        resolve({ status: 'error', error: `Failed to parse assembly JSON: ${err.message}` });
-      }
-    });
-  });
+// IPC Handler to batch-resolve & convert an assembly's .psm children to STEP
+ipcMain.handle('parse-cad-assembly-batch', async (_event, asmPath: string) => {
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  return daemonClient.sendRequest('parse_cad_assembly_batch', { asmPath, exportDir: exportsDir });
 });
 
 // IPC Handler to load binary STL data safely into renderer process
@@ -192,262 +167,161 @@ ipcMain.handle('cancel-process', async () => {
 });
 
 // IPC Handler to run fast 3D analysis & generate preview SVG & STL
-ipcMain.handle('run-analyze', async (_event, stepPath: string) => {
-  return new Promise((resolve) => {
-    const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-    const exportsDir = path.join(desktopPath, 'exports');
-    
-    if (!fs.existsSync(exportsDir)) {
-      fs.mkdirSync(exportsDir, { recursive: true });
+ipcMain.handle('run-analyze', async (_event, stepPath: string, originalPath?: string) => {
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  const baseName = path.basename(stepPath, path.extname(stepPath));
+  const svgPreviewOut = path.join(exportsDir, `${baseName}_preview.svg`);
+  const stlPreviewOut = path.join(exportsDir, `${baseName}_preview.stl`);
+
+  const res = await daemonClient.sendRequest('run_analyze', { stepPath, svgPreviewOut, stlPreviewOut, originalPath });
+  if (res && res.status === 'success') {
+    res.svg_preview_path = svgPreviewOut;
+    res.stl_preview_path = stlPreviewOut;
+    if (fs.existsSync(svgPreviewOut)) {
+      res.svg_preview_content = fs.readFileSync(svgPreviewOut, 'utf8');
     }
-
-    const baseName = path.basename(stepPath, path.extname(stepPath));
-    const svgPreviewOut = path.join(exportsDir, `${baseName}_preview.svg`);
-    const stlPreviewOut = path.join(exportsDir, `${baseName}_preview.stl`);
-
-    const cmdArgs = [scriptPath, 'analyze', stepPath, svgPreviewOut, stlPreviewOut];
-
-    console.log(`Spawning: "${pythonPath}" ${cmdArgs.join(' ')}`);
-
-    const child = spawn(pythonPath, cmdArgs);
-    const pidStr = child.pid?.toString() || Math.random().toString();
-    activeProcesses.set(pidStr, child);
-
-    const timeout = setTimeout(() => {
-      if (activeProcesses.has(pidStr)) {
-        console.warn(`Analysis process timed out for path: ${stepPath}. Killing process...`);
-        try {
-          child.kill();
-        } catch (e) {}
-        activeProcesses.delete(pidStr);
-        resolve({
-          status: 'error',
-          error: 'Analysis timed out. The CAD model might be too complex or double-curved.'
-        });
-      }
-    }, 15000);
-
-    let stdoutData = '';
-    let stderrData = '';
-
-    child.stdout.on('data', (data) => {
-      stdoutData += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderrData += data.toString();
-    });
-
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      activeProcesses.delete(pidStr);
-
-      if (code !== 0) {
-        resolve({
-          status: 'error',
-          error: `Analysis backend failed with code ${code}. Error: ${stderrData || 'Unknown error'}`
-        });
-        return;
-      }
-
-      try {
-        const lines = stdoutData.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        const resultJson = JSON.parse(lastLine);
-
-        if (resultJson.status === 'success') {
-          resultJson.svg_preview_path = svgPreviewOut;
-          resultJson.stl_preview_path = stlPreviewOut;
-          
-          if (fs.existsSync(svgPreviewOut)) {
-            resultJson.svg_preview_content = fs.readFileSync(svgPreviewOut, 'utf8');
-          }
-        }
-        resolve(resultJson);
-      } catch (err: any) {
-        resolve({
-          status: 'error',
-          error: `Failed to parse analysis output: ${err.message}. Output was: ${stdoutData}`
-        });
-      }
-    });
-  });
+  }
+  return res;
 });
 
-// IPC Handler to run single unfolding script
-ipcMain.handle('run-unfold', async (_event, args: { stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string }) => {
-  return new Promise((resolve) => {
-    const { stepPath, kfactor, baseFace, excludeBendLines, bendStyle } = args;
+// IPC Handler to batch run 3D geometry analysis in parallel via daemon multi-threading
+ipcMain.handle('run-analyze-batch', async (_event, items: { stepPath: string; originalPath?: string }[]) => {
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
 
-    const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-    const exportsDir = path.join(desktopPath, 'exports');
-    
-    if (!fs.existsSync(exportsDir)) {
-      fs.mkdirSync(exportsDir, { recursive: true });
-    }
-
-    const baseName = path.basename(stepPath, path.extname(stepPath));
-    const baseFaceSuffix = baseFace ? `_${baseFace.replace(/[^a-zA-Z0-9]/g, '_')}` : '';
-    const dxfOut = path.join(exportsDir, `${baseName}${baseFaceSuffix}_unfolded.dxf`);
-    const svgOut = path.join(exportsDir, `${baseName}${baseFaceSuffix}_unfolded.svg`);
-
-    const cmdArgs = [
-      scriptPath,
-      'unfold',
-      stepPath,
-      kfactor.toString(),
-      dxfOut,
-      svgOut,
-      baseFace || 'auto',
-      excludeBendLines ? 'true' : 'false',
-      bendStyle || 'tick'
-    ];
-
-    console.log(`Spawning: "${pythonPath}" ${cmdArgs.join(' ')}`);
-
-    const child = spawn(pythonPath, cmdArgs);
-    const pidStr = child.pid?.toString() || Math.random().toString();
-    activeProcesses.set(pidStr, child);
-
-    const timeout = setTimeout(() => {
-      if (activeProcesses.has(pidStr)) {
-        console.warn(`Unfold process timed out for path: ${stepPath}. Killing process...`);
-        try {
-          child.kill();
-        } catch (e) {}
-        activeProcesses.delete(pidStr);
-        resolve({
-          status: 'error',
-          error: 'Unfold process timed out.'
-        });
-      }
-    }, 25000);
-
-    let stdoutData = '';
-    let stderrData = '';
-
-    child.stdout.on('data', (data) => {
-      stdoutData += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderrData += data.toString();
-    });
-
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      activeProcesses.delete(pidStr);
-
-      if (code !== 0) {
-        resolve({
-          status: 'error',
-          error: `Unfolding backend failed with code ${code}. Error: ${stderrData || 'Unknown error'}`
-        });
-        return;
-      }
-
-      try {
-        const lines = stdoutData.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        const resultJson = JSON.parse(lastLine);
-
-        if (resultJson.status === 'success') {
-          resultJson.dxf_path = dxfOut;
-          resultJson.svg_path = svgOut;
-          
-          if (fs.existsSync(svgOut)) {
-            resultJson.svg_content = fs.readFileSync(svgOut, 'utf8');
-          }
-        }
-        resolve(resultJson);
-      } catch (err: any) {
-        resolve({
-          status: 'error',
-          error: `Failed to parse backend output: ${err.message}. Output was: ${stdoutData}`
-        });
-      }
-    });
+  const preparedItems = items.map((item) => {
+    const baseName = path.basename(item.stepPath, path.extname(item.stepPath));
+    const svgPreviewOut = path.join(exportsDir, `${baseName}_preview.svg`);
+    const stlPreviewOut = path.join(exportsDir, `${baseName}_preview.stl`);
+    return {
+      stepPath: item.stepPath,
+      originalPath: item.originalPath,
+      svgPreviewOut,
+      stlPreviewOut,
+    };
   });
+
+  const res = await daemonClient.sendRequest('run_analyze_batch', { items: preparedItems });
+  if (res && res.status === 'success' && Array.isArray(res.results)) {
+    for (const r of res.results) {
+      if (r && r.status === 'success') {
+        if (r.svg_preview_path && fs.existsSync(r.svg_preview_path)) {
+          r.svg_preview_content = fs.readFileSync(r.svg_preview_path, 'utf8');
+        }
+      }
+    }
+  }
+  return res;
+});
+
+// IPC Handler to run OpenCASCADE unfolding
+ipcMain.handle('run-unfold', async (_event, args: { stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string; mirror?: boolean; exportMinimalDimpleHoles?: boolean; bendRadius?: number; etchMarkerPosition?: string; etchMarkerLength?: number }) => {
+  const { stepPath, kfactor, baseFace, excludeBendLines, bendStyle, mirror, exportMinimalDimpleHoles, bendRadius, etchMarkerPosition, etchMarkerLength } = args;
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  const baseName = path.basename(stepPath, path.extname(stepPath));
+  const baseFaceSuffix = baseFace ? `_${baseFace.replace(/[^a-zA-Z0-9]/g, '_')}` : '';
+  const mirrorSuffix = mirror ? '_MIR' : '';
+  const dxfOut = path.join(exportsDir, `${baseName}${baseFaceSuffix}${mirrorSuffix}_unfolded.dxf`);
+  const svgOut = path.join(exportsDir, `${baseName}${baseFaceSuffix}${mirrorSuffix}_unfolded.svg`);
+
+  const res = await daemonClient.sendRequest('run_unfold', {
+    stepPath,
+    kfactor,
+    dxfOut,
+    svgOut,
+    baseFace: baseFace || 'auto',
+    excludeBendLines: Boolean(excludeBendLines),
+    bendStyle: bendStyle || 'tick',
+    mirror: Boolean(mirror),
+    export_minimal_dimple_holes: exportMinimalDimpleHoles !== false,
+    bendRadius,
+    etchMarkerPosition: etchMarkerPosition || 'interior',
+    etchMarkerLength: etchMarkerLength || 4.5
+  });
+
+  if (res && res.status === 'success') {
+    res.dxf_path = dxfOut;
+    res.svg_path = svgOut;
+    if (fs.existsSync(svgOut)) {
+      res.svg_content = fs.readFileSync(svgOut, 'utf8');
+    }
+  }
+  return res;
+});
+
+// IPC Handler to run batch unfolding in parallel via daemon multi-threading
+ipcMain.handle('run-unfold-batch', async (_event, items: Array<{ stepPath: string; kfactor: number; baseFace?: string; excludeBendLines?: boolean; bendStyle?: string; mirror?: boolean; exportMinimalDimpleHoles?: boolean; bendRadius?: number; etchMarkerPosition?: string; etchMarkerLength?: number }>) => {
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+
+  const preparedItems = items.map((item) => {
+    const baseName = path.basename(item.stepPath, path.extname(item.stepPath));
+    const baseFaceSuffix = item.baseFace ? `_${item.baseFace.replace(/[^a-zA-Z0-9]/g, '_')}` : '';
+    const mirrorSuffix = item.mirror ? '_MIR' : '';
+    const dxfOut = path.join(exportsDir, `${baseName}${baseFaceSuffix}${mirrorSuffix}_unfolded.dxf`);
+    const svgOut = path.join(exportsDir, `${baseName}${baseFaceSuffix}${mirrorSuffix}_unfolded.svg`);
+
+    return {
+      stepPath: item.stepPath,
+      kfactor: item.kfactor,
+      baseFace: item.baseFace || 'auto',
+      excludeBendLines: Boolean(item.excludeBendLines),
+      bendStyle: item.bendStyle || 'tick',
+      mirror: Boolean(item.mirror),
+      export_minimal_dimple_holes: item.exportMinimalDimpleHoles !== false,
+      bendRadius: item.bendRadius,
+      etchMarkerPosition: item.etchMarkerPosition || 'interior',
+      etchMarkerLength: item.etchMarkerLength || 4.5,
+      dxfOut,
+      svgOut
+    };
+  });
+
+  const res = await daemonClient.sendRequest('run_unfold_batch', { items: preparedItems });
+  if (res && res.status === 'success' && Array.isArray(res.results)) {
+    for (const r of res.results) {
+      if (r && r.status === 'success') {
+        if (r.svg_path && fs.existsSync(r.svg_path)) {
+          r.svg_content = fs.readFileSync(r.svg_path, 'utf8');
+        }
+      }
+    }
+  }
+  return res;
 });
 
 // IPC Handler to run BULK STEP processing
 ipcMain.handle('run-batch-step', async (_event, args: { filePaths: string[]; kfactor?: number; bendStyle?: string; outputDir?: string }) => {
-  return new Promise((resolve) => {
-    const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-    const exportsDir = args.outputDir || path.join(desktopPath, 'exports', `Batch_${Date.now()}`);
-    if (!fs.existsSync(exportsDir)) {
-      fs.mkdirSync(exportsDir, { recursive: true });
-    }
-
-    const configPath = path.join(app.getPath('temp'), `batch_config_${Date.now()}.json`);
-    const configData = {
-      file_paths: args.filePaths,
-      output_dir: exportsDir,
-      kfactor: args.kfactor || 0.40,
-      bend_style: args.bendStyle || 'tick'
-    };
-
-    try {
-      fs.writeFileSync(configPath, JSON.stringify(configData, null, 2), 'utf8');
-    } catch (e: any) {
-      resolve({ status: 'error', error: `Failed to write batch config: ${e.message}` });
-      return;
-    }
-
-    const pythonCode = `
-import json, sys
-from batch_processor import run_batch_step_processing
-with open(r'${configPath.replace(/\\/g, '\\\\')}', 'r', encoding='utf-8') as f:
-    cfg = json.load(f)
-res = run_batch_step_processing(cfg['file_paths'], cfg['output_dir'], cfg['kfactor'], cfg['bend_style'])
-print(json.dumps(res))
-`;
-    const cmdArgs = ['-c', pythonCode];
-    console.log(`Spawning Batch STEP Processor: "${pythonPath}" ${cmdArgs.join(' ')}`);
-
-    const child = spawn(pythonPath, cmdArgs);
-    const pidStr = child.pid?.toString() || Math.random().toString();
-    activeProcesses.set(pidStr, child);
-
-    let stdoutData = '';
-    let stderrData = '';
-
-    child.stdout.on('data', (d) => stdoutData += d.toString());
-    child.stderr.on('data', (d) => stderrData += d.toString());
-
-    child.on('close', (code) => {
-      activeProcesses.delete(pidStr);
-      try {
-        if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
-      } catch (e) {}
-
-      if (code !== 0) {
-        resolve({ status: 'error', error: `Batch processing failed: ${stderrData || stdoutData}` });
-        return;
-      }
-      try {
-        const lines = stdoutData.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        resolve(JSON.parse(lastLine));
-      } catch (err: any) {
-        resolve({ status: 'error', error: `Failed to parse batch output: ${err.message}` });
-      }
-    });
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = args.outputDir || path.join(desktopPath, 'exports', `Batch_${Date.now()}`);
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  return daemonClient.sendRequest('run_batch_step', {
+    filePaths: args.filePaths,
+    outputDir: exportsDir,
+    kfactor: args.kfactor || 0.44,
+    bendStyle: args.bendStyle || 'tick'
   });
 });
 
 // IPC Handler to clear persistent cache
 ipcMain.handle('clear-cache', async () => {
-  return new Promise((resolve) => {
-    const pythonCode = `
-import json
-from cache_manager import clear_cache_folder
-clear_cache_folder()
-print(json.dumps({"status": "success"}))
-`;
-    const child = spawn(pythonPath, ['-c', pythonCode]);
-    child.on('close', () => resolve({ status: 'success' }));
-  });
+  return daemonClient.sendRequest('clear_cache', {});
 });
 
 // IPC Handler to run FreeCAD nesting script
@@ -456,10 +330,16 @@ ipcMain.handle('run-nesting', async (_event, args: {
   sheetHeight: number;
   spacing: number;
   margin: number;
+  sheetCutoutWidth?: number;
+  sheetCutoutHeight?: number;
+  sheetProfile?: string;
   autoFill?: boolean;
   rotations?: number[];
   exportFilename?: string;
   excludeBendLines?: boolean;
+  bendStyle?: string;
+  etchMarkerPosition?: string;
+  etchMarkerLength?: number;
   parts: Array<{
     id: string;
     stepPath: string;
@@ -467,126 +347,64 @@ ipcMain.handle('run-nesting', async (_event, args: {
     quantity: number;
     kfactor: number;
     baseFace?: string;
+    bendRadius?: number;
+    etchMarkerPosition?: string;
+    etchMarkerLength?: number;
   }>;
 }) => {
-  return new Promise((resolve) => {
-    const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
-    const exportsDir = path.join(desktopPath, 'exports');
-    if (!fs.existsSync(exportsDir)) {
-      fs.mkdirSync(exportsDir, { recursive: true });
-    }
+  const desktopPath = path.join(app.getPath('desktop'), 'Cadanest');
+  const exportsDir = path.join(desktopPath, 'exports');
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
+  const filename = args.exportFilename || `nested_${Date.now()}.dxf`;
+  const exportDxfOut = path.join(exportsDir, filename);
 
-    const filename = args.exportFilename || `nested_${Date.now()}.dxf`;
-    const exportDxfOut = path.join(exportsDir, filename);
+  return daemonClient.sendRequest('run_nesting', {
+    sheet_width: args.sheetWidth,
+    sheet_height: args.sheetHeight,
+    sheet_cutout_width: args.sheetCutoutWidth ?? null,
+    sheet_cutout_height: args.sheetCutoutHeight ?? null,
+    sheet_profile: args.sheetProfile ?? 'rect',
+    spacing: args.spacing,
+    margin: args.margin,
+    auto_fill: args.autoFill || false,
+    rotations: args.rotations || [0.0, 90.0, 180.0, 270.0],
+    export_dxf_path: exportDxfOut,
+    exclude_bend_lines: args.excludeBendLines || false,
+    bend_style: (args as any).bendStyle || 'tick',
+    allow_part_in_part: (args as any).allowPartInPart !== false,
+    export_minimal_dimple_holes: (args as any).exportMinimalDimpleHoles !== false,
+    parts: args.parts.map(p => ({
+      id: p.id,
+      step_path: p.stepPath,
+      dxf_path: p.dxfPath || null,
+      quantity: p.quantity,
+      kfactor: p.kfactor,
+      base_face: p.baseFace || null,
+      name: (p as any).name || null,
+      group: (p as any).group || null,
+      material: (p as any).material || 'Mild Steel',
+      thickness: typeof (p as any).thickness === 'number' ? (p as any).thickness : 2.0,
+      bend_radius: p.bendRadius || null
+    }))
+  });
+});
 
-    const configPath = path.join(app.getPath('temp'), `nest_config_${Date.now()}.json`);
-    
-    const pythonConfig = {
-      sheet_width: args.sheetWidth,
-      sheet_height: args.sheetHeight,
-      spacing: args.spacing,
-      margin: args.margin,
-      auto_fill: args.autoFill || false,
-      rotations: args.rotations || [0.0, 90.0, 180.0, 270.0],
-      export_dxf_path: exportDxfOut,
-      exclude_bend_lines: args.excludeBendLines || false,
-      parts: args.parts.map(p => ({
-        id: p.id,
-        step_path: p.stepPath,
-        dxf_path: p.dxfPath || null,
-        quantity: p.quantity,
-        kfactor: p.kfactor,
-        base_face: p.baseFace || null,
-        name: (p as any).name || null,
-        group: (p as any).group || null
-      }))
-    };
-
-    try {
-      fs.writeFileSync(configPath, JSON.stringify(pythonConfig, null, 2), 'utf8');
-    } catch (writeErr: any) {
-      resolve({
-        status: 'error',
-        error: `Failed to write nesting configuration: ${writeErr.message}`
-      });
-      return;
-    }
-
-    const cmdArgs = [nesterScriptPath, configPath];
-    console.log(`Spawning Nesting Process: "${pythonPath}" ${cmdArgs.join(' ')}`);
-
-    const child = spawn(pythonPath, cmdArgs);
-    const pidStr = child.pid?.toString() || Math.random().toString();
-    activeProcesses.set(pidStr, child);
-
-    const timeout = setTimeout(() => {
-      if (activeProcesses.has(pidStr)) {
-        console.warn(`Nesting process timed out. Killing...`);
-        try {
-          child.kill();
-        } catch (e) {}
-        activeProcesses.delete(pidStr);
-        resolve({
-          status: 'error',
-          error: 'Nesting process timed out. Try reducing part count or increasing spacing.'
-        });
-      }
-    }, 900000);
-
-    let stdoutData = '';
-    let stderrData = '';
-
-    child.stdout.on('data', (data) => {
-      const text = data.toString();
-      stdoutData += text;
-      const lines = text.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-          try {
-            const parsed = JSON.parse(trimmed);
-            if (parsed.type === 'progress') {
-              mainWindow?.webContents.send('nesting-progress', parsed);
-            }
-          } catch (e) {}
-        }
-      }
-    });
-
-    child.stderr.on('data', (data) => {
-      stderrData += data.toString();
-    });
-
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      activeProcesses.delete(pidStr);
-
-      try {
-        if (fs.existsSync(configPath)) {
-          fs.unlinkSync(configPath);
-        }
-      } catch (err) {}
-
-      if (code !== 0) {
-        resolve({
-          status: 'error',
-          error: `Nesting backend failed with code ${code}. Error: ${stderrData || 'Unknown error or cancelled'}`
-        });
-        return;
-      }
-
-      try {
-        const lines = stdoutData.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        const resultJson = JSON.parse(lastLine);
-        resolve(resultJson);
-      } catch (err: any) {
-        resolve({
-          status: 'error',
-          error: `Failed to parse nesting output: ${err.message}. Output was: ${stdoutData}`
-        });
-      }
-    });
+// IPC Handler to run reverse K-factor calibration solver
+ipcMain.handle('calibrate-kfactor', async (_event, args: {
+  targetFlatLength: number;
+  straightSum: number;
+  bendAngles: number[];
+  bendRadii: number[];
+  thickness: number;
+}) => {
+  return daemonClient.sendRequest('calibrate_kfactor', {
+    target_flat_length: args.targetFlatLength,
+    straight_sum: args.straightSum,
+    bend_angles: args.bendAngles,
+    bend_radii: args.bendRadii,
+    thickness: args.thickness
   });
 });
 

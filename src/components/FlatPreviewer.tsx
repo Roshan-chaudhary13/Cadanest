@@ -16,6 +16,7 @@ interface FlatPreviewerProps {
 }
 
 export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({ 
+  onToggleFullScreen,
   svgContent, 
   baseFace, 
   thickness, 
@@ -29,6 +30,12 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [rotation, setRotation] = useState(rotationAngle || 0);
+
+  const [showCut, setShowCut] = useState(true);
+  const [showHoles, setShowHoles] = useState(true);
+  const [showUpBends, setShowUpBends] = useState(true);
+  const [showDownBends, setShowDownBends] = useState(true);
+  const [showForming, setShowForming] = useState(true);
 
   useEffect(() => {
     if (rotationAngle !== undefined) {
@@ -45,13 +52,14 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
 
   // Center and fit the drawing in the viewport
   const resetView = (currentViewBox = viewBox) => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || !currentViewBox || currentViewBox.width <= 0 || currentViewBox.height <= 0) return;
     const { clientWidth, clientHeight } = containerRef.current;
+    if (clientWidth <= 0 || clientHeight <= 0) return;
     
-    // Scale to fit container with 10% margin
+    // Scale to fit container with 15% margin
     const scaleX = (clientWidth * 0.85) / currentViewBox.width;
     const scaleY = (clientHeight * 0.85) / currentViewBox.height;
-    const newScale = Math.min(scaleX, scaleY, 4); // Limit max scale to 4x
+    const newScale = Math.min(scaleX, scaleY);
 
     setScale(newScale);
     
@@ -75,20 +83,71 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
       const svgNode = doc.querySelector('svg');
 
       if (svgNode) {
-        // Extract viewBox attributes
+        // Calculate exact bounding box from actual SVG geometry elements
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const geomElements = svgNode.querySelectorAll('path, line, polyline, rect, circle');
+        geomElements.forEach(el => {
+          if (el.tagName === 'line') {
+            const x1 = parseFloat(el.getAttribute('x1') || '0');
+            const y1 = parseFloat(el.getAttribute('y1') || '0');
+            const x2 = parseFloat(el.getAttribute('x2') || '0');
+            const y2 = parseFloat(el.getAttribute('y2') || '0');
+            minX = Math.min(minX, x1, x2); maxX = Math.max(maxX, x1, x2);
+            minY = Math.min(minY, y1, y2); maxY = Math.max(maxY, y1, y2);
+          } else if (el.tagName === 'polyline') {
+            const pts = (el.getAttribute('points') || '').trim().split(/\s+/).flatMap(p => p.split(',').map(Number)).filter(v => !isNaN(v));
+            for (let i = 0; i < pts.length; i += 2) {
+              minX = Math.min(minX, pts[i]); maxX = Math.max(maxX, pts[i]);
+              if (i + 1 < pts.length) { minY = Math.min(minY, pts[i+1]); maxY = Math.max(maxY, pts[i+1]); }
+            }
+          } else if (el.tagName === 'rect') {
+            const x = parseFloat(el.getAttribute('x') || '0');
+            const y = parseFloat(el.getAttribute('y') || '0');
+            const w = parseFloat(el.getAttribute('width') || '0');
+            const h = parseFloat(el.getAttribute('height') || '0');
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x + w);
+            minY = Math.min(minY, y); maxY = Math.max(maxY, y + h);
+          } else if (el.tagName === 'circle') {
+            const cx = parseFloat(el.getAttribute('cx') || '0');
+            const cy = parseFloat(el.getAttribute('cy') || '0');
+            const r = parseFloat(el.getAttribute('r') || '0');
+            minX = Math.min(minX, cx - r); maxX = Math.max(maxX, cx + r);
+            minY = Math.min(minY, cy - r); maxY = Math.max(maxY, cy + r);
+          } else if (el.tagName === 'path') {
+            const d = el.getAttribute('d') || '';
+            const nums = (d.match(/[-+]?\d*\.?\d+/g) || []).map(Number);
+            for (let i = 0; i < nums.length; i += 2) {
+              if (!isNaN(nums[i])) { minX = Math.min(minX, nums[i]); maxX = Math.max(maxX, nums[i]); }
+              if (i + 1 < nums.length && !isNaN(nums[i+1])) { minY = Math.min(minY, nums[i+1]); maxY = Math.max(maxY, nums[i+1]); }
+            }
+          }
+        });
+
         let activeViewBox = { x: 0, y: 0, width: 500, height: 500 };
-        const vbAttr = svgNode.getAttribute('viewBox');
-        if (vbAttr) {
-          const parts = vbAttr.split(' ').map(Number);
-          if (parts.length === 4) {
-            activeViewBox = { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+        if (minX !== Infinity && maxX !== -Infinity && minX < maxX && minY < maxY) {
+          const padW = (maxX - minX) * 0.05;
+          const padH = (maxY - minY) * 0.05;
+          activeViewBox = {
+            x: minX - padW,
+            y: minY - padH,
+            width: (maxX - minX) + 2 * padW,
+            height: (maxY - minY) + 2 * padH
+          };
+          setViewBox(activeViewBox);
+        } else {
+          const vbAttr = svgNode.getAttribute('viewBox');
+          if (vbAttr) {
+            const parts = vbAttr.split(' ').map(Number);
+            if (parts.length === 4) {
+              activeViewBox = { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+              setViewBox(activeViewBox);
+            }
+          } else {
+            const w = parseFloat(svgNode.getAttribute('width') || '500');
+            const h = parseFloat(svgNode.getAttribute('height') || '500');
+            activeViewBox = { x: 0, y: 0, width: w, height: h };
             setViewBox(activeViewBox);
           }
-        } else {
-          const w = parseFloat(svgNode.getAttribute('width') || '500');
-          const h = parseFloat(svgNode.getAttribute('height') || '500');
-          activeViewBox = { x: 0, y: 0, width: w, height: h };
-          setViewBox(activeViewBox);
         }
 
         // Color mapping override: convert any legacy FreeCAD dark-bg colors to
@@ -122,15 +181,25 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
               el.setAttribute('stroke-dasharray', '4,3');
               el.setAttribute('vector-effect', 'non-scaling-stroke');
             } else if (cls.includes('bend-centerline-up') || cls.includes('up-bend')) {
-              el.setAttribute('stroke', '#0073CC'); // Industrial Blue for UP bend (matching Image 1)
+              el.setAttribute('stroke', '#0073CC'); // Industrial Blue for UP bend
               el.setAttribute('stroke-width', '2.0px');
-              el.setAttribute('stroke-dasharray', '10,3,2,3'); // Dash-Dot pattern
+              const origDash = el.getAttribute('stroke-dasharray');
+              if (origDash && origDash !== 'none') {
+                el.setAttribute('stroke-dasharray', origDash);
+              } else {
+                el.removeAttribute('stroke-dasharray');
+              }
               el.setAttribute('stroke-linecap', 'round');
               el.setAttribute('vector-effect', 'non-scaling-stroke');
             } else if (cls.includes('bend-centerline-down') || cls.includes('down-bend')) {
               el.setAttribute('stroke', '#EF4444'); // Crimson Red for DOWN bend
               el.setAttribute('stroke-width', '2.0px');
-              el.setAttribute('stroke-dasharray', '10,3,2,3'); // Dash-Dot pattern
+              const origDash = el.getAttribute('stroke-dasharray');
+              if (origDash && origDash !== 'none') {
+                el.setAttribute('stroke-dasharray', origDash);
+              } else {
+                el.removeAttribute('stroke-dasharray');
+              }
               el.setAttribute('stroke-linecap', 'round');
               el.setAttribute('vector-effect', 'non-scaling-stroke');
             } else if (cls.includes('fold') || cls.includes('bend') || lowerStroke === '#e84d00' || lowerStroke === '#ff5733' || lowerStroke === '#10b981') {
@@ -138,27 +207,39 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
               const isUpBend = bendLineCount % 2 === 1;
               el.setAttribute('stroke', isUpBend ? '#0073CC' : '#EF4444');
               el.setAttribute('stroke-width', '2.0px');
-              el.setAttribute('stroke-dasharray', '10,3,2,3');
+              const origDash = el.getAttribute('stroke-dasharray');
+              if (origDash && origDash !== 'none') {
+                el.setAttribute('stroke-dasharray', origDash);
+              } else {
+                el.removeAttribute('stroke-dasharray');
+              }
               el.setAttribute('stroke-linecap', 'round');
               el.setAttribute('vector-effect', 'non-scaling-stroke');
             } else if (stroke) {
-              if (lowerStroke === '#c00000') {
-                el.setAttribute('stroke', isDark ? '#F1F5F9' : '#1A1D2E');
-                el.setAttribute('stroke-width', '1.0px');
-              } else if (lowerStroke === '#000080' || lowerStroke === '#00a3ff') {
-                el.setAttribute('stroke', isDark ? '#33A3FF' : '#0073CC');
-                el.setAttribute('stroke-width', '0.8px');
+              if (lowerStroke === '#c00000' || cls.includes('cut') || cls.includes('outer')) {
+                el.setAttribute('stroke', isDark ? '#38BDF8' : '#0284C7');
+                el.setAttribute('stroke-width', '1.2px');
+              } else if (cls.includes('hole') || cls.includes('inner') || lowerStroke === '#000080' || lowerStroke === '#00a3ff') {
+                el.setAttribute('stroke', isDark ? '#F59E0B' : '#D97706');
+                el.setAttribute('stroke-width', '1.2px');
+                el.setAttribute('fill', 'none');
+              } else if (cls.includes('up-bend') || cls.includes('bend-centerline-up')) {
+                el.setAttribute('stroke', isDark ? '#10B981' : '#059669');
+                el.setAttribute('stroke-width', '1.5px');
+              } else if (cls.includes('down-bend') || cls.includes('bend-centerline-down')) {
+                el.setAttribute('stroke', isDark ? '#EF4444' : '#DC2626');
+                el.setAttribute('stroke-width', '1.5px');
               } else if (lowerStroke === '#33ff33') {
                 el.setAttribute('stroke', isDark ? '#10B981' : '#0A8F5A');
-                el.setAttribute('stroke-width', '0.6px');
+                el.setAttribute('stroke-width', '0.8px');
               } else if (
                 lowerStroke === '#000000' || 
                 lowerStroke === 'black' || 
                 lowerStroke === 'rgb(0,0,0)' || 
                 lowerStroke.startsWith('rgb(0,0,0')
               ) {
-                el.setAttribute('stroke', is3dView ? (isDark ? '#33A3FF' : '#0073CC') : (isDark ? '#F1F5F9' : '#1A1D2E'));
-                el.setAttribute('stroke-width', '0.8px');
+                el.setAttribute('stroke', is3dView ? (isDark ? '#38BDF8' : '#0284C7') : (isDark ? '#F8FAFC' : '#0F172A'));
+                el.setAttribute('stroke-width', '1.0px');
               }
             }
           });
@@ -230,7 +311,6 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
               currentGroup.push(item);
             } else {
               const lastItem = currentGroup[currentGroup.length - 1];
-              // 8.0 units threshold is safe for components spaced by 20mm
               if (item.minX - lastItem.maxX > 8.0) {
                 groups.push(currentGroup);
                 currentGroup = [item];
@@ -262,23 +342,23 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
           });
         }
 
-        // Inject component hover & select highlighting rules into the style block
-        const styleNode = svgNode.querySelector('style');
-        if (styleNode) {
-          styleNode.textContent += `
-            .unfolded-component {
-              cursor: pointer;
-            }
-            .unfolded-component:hover .cut {
-              stroke: #FFB300 !important;
-              stroke-width: 2.2px !important;
-            }
-            .unfolded-component:hover .fold {
-              stroke: #E84D00 !important;
-              stroke-width: 1.8px !important;
-            }
-          `;
+        // Inject component hover & select highlighting rules + layer display controls
+        let styleNode = svgNode.querySelector('style') as Element | null;
+        if (!styleNode) {
+          const newStyle = doc.createElementNS('http://www.w3.org/2000/svg', 'style');
+          svgNode.prepend(newStyle);
+          styleNode = newStyle as Element;
         }
+        styleNode.textContent = (styleNode.textContent || '') + `
+          .cut-outer, .layer-cut { display: ${showCut ? 'inline' : 'none'} !important; }
+          .cut-inner, .layer-holes { display: ${showHoles ? 'inline' : 'none'} !important; }
+          .bend-centerline-up, .layer-up-bends { display: ${showUpBends ? 'inline' : 'none'} !important; }
+          .bend-centerline-down, .layer-down-bends { display: ${showDownBends ? 'inline' : 'none'} !important; }
+          .layer-forming { display: ${showForming ? 'inline' : 'none'} !important; }
+          .unfolded-component { cursor: pointer; }
+          .unfolded-component:hover .cut { stroke: #FFB300 !important; stroke-width: 2.2px !important; }
+          .unfolded-component:hover .fold { stroke: #E84D00 !important; stroke-width: 1.8px !important; }
+        `;
 
         // Get inner HTML of the SVG (excluding outer <svg> tag)
         setInnerElements(svgNode.innerHTML);
@@ -289,7 +369,7 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
     } catch (e) {
       console.error('Failed to parse SVG content:', e);
     }
-  }, [svgContent, is3dView, baseFace, themeMode]);
+  }, [svgContent, is3dView, baseFace, themeMode, showCut, showHoles, showUpBends, showDownBends, showForming]);
 
   // Automatically recalculate scale and center when container resizes
   useEffect(() => {
@@ -370,7 +450,7 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
     <div className="relative flex-1 h-full w-full bg-industrial-darker border border-industrial-border rounded-lg overflow-hidden flex flex-col" ref={containerRef} onWheel={handleWheel}>
       {/* Upper Viewport Toolbar */}
       <div className="absolute top-3 left-3 right-3 flex justify-between items-center pointer-events-none z-10">
-        <div className="bg-industrial-card/90 backdrop-blur border border-industrial-border px-3 py-1.5 rounded text-xs font-mono text-industrial-muted flex flex-wrap items-center gap-4 pointer-events-auto max-w-[80%]">
+        <div className="bg-industrial-card/90 backdrop-blur border border-industrial-border px-3 py-1.5 rounded text-xs font-mono text-industrial-muted flex flex-wrap items-center gap-4 pointer-events-auto max-w-[70%]">
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 bg-industrial-accent rounded-full animate-ping"></span>
             <span>{title ? title : (is3dView ? '3D Isometric view' : '2D Flattened Pattern')}</span>
@@ -400,19 +480,24 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
         </div>
         
         {/* Controls */}
-        <div className="flex gap-2 pointer-events-auto">
-          <button onClick={() => setScale(s => Math.min(s * 1.2, 30))} className="p-2 bg-industrial-card/90 hover:bg-industrial-accent hover:text-industrial-bg border border-industrial-border rounded transition text-industrial-text" title="Zoom In">
-            <ZoomIn size={16} />
+        <div className="flex gap-1.5 pointer-events-auto items-center bg-industrial-darker/95 border border-industrial-border shadow-xl backdrop-blur-md rounded-lg p-1">
+          <button onClick={() => setScale(s => Math.min(s * 1.2, 30))} className="h-7 w-7 flex items-center justify-center bg-industrial-card hover:bg-industrial-accent hover:text-white border border-industrial-border/60 rounded text-industrial-text transition cursor-pointer shrink-0" title="Zoom In">
+            <ZoomIn size={14} />
           </button>
-          <button onClick={() => setScale(s => Math.max(s / 1.2, 0.1))} className="p-2 bg-industrial-card/90 hover:bg-industrial-accent hover:text-industrial-bg border border-industrial-border rounded transition text-industrial-text" title="Zoom Out">
-            <ZoomOut size={16} />
+          <button onClick={() => setScale(s => Math.max(s / 1.2, 0.1))} className="h-7 w-7 flex items-center justify-center bg-industrial-card hover:bg-industrial-accent hover:text-white border border-industrial-border/60 rounded text-industrial-text transition cursor-pointer shrink-0" title="Zoom Out">
+            <ZoomOut size={14} />
           </button>
-          <button onClick={() => setRotation(r => (r + 90) % 360)} className="p-2 bg-industrial-card/90 hover:bg-industrial-accent hover:text-industrial-bg border border-industrial-border rounded transition text-industrial-text" title="Rotate Clockwise">
-            <RotateCw size={16} />
+          <button onClick={() => setRotation(r => (r + 90) % 360)} className="h-7 w-7 flex items-center justify-center bg-industrial-card hover:bg-industrial-accent hover:text-white border border-industrial-border/60 rounded text-industrial-text transition cursor-pointer shrink-0" title="Rotate Clockwise 90°">
+            <RotateCw size={14} />
           </button>
-          <button onClick={() => { resetView(); setRotation(0); }} className="p-2 bg-industrial-card/90 hover:bg-industrial-accent hover:text-industrial-bg border border-industrial-border rounded transition text-industrial-text" title="Reset view">
-            <Maximize2 size={16} />
+          <button onClick={() => { resetView(); setRotation(0); }} className="h-7 px-2.5 flex items-center justify-center bg-industrial-card hover:bg-industrial-accent hover:text-white border border-industrial-border/60 rounded text-industrial-text transition cursor-pointer font-mono font-bold text-[10px] shrink-0" title="Reset View & Scale">
+            FIT
           </button>
+          {onToggleFullScreen && (
+            <button onClick={onToggleFullScreen} className="h-7 w-7 flex items-center justify-center bg-industrial-card hover:bg-industrial-accent hover:text-white border border-industrial-border/60 rounded text-industrial-text transition cursor-pointer shrink-0 ml-0.5" title="Expand Viewport to Full Screen">
+              <Maximize2 size={14} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -425,7 +510,11 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseLeave}
         >
-          <g transform={`translate(${position.x}, ${position.y}) scale(${scale}) rotate(${rotation}, ${viewBox.x + viewBox.width / 2}, ${viewBox.y + viewBox.height / 2})`} dangerouslySetInnerHTML={{ __html: innerElements }} />
+          <g 
+            style={{ willChange: 'transform', transformOrigin: 'center' }}
+            transform={`translate(${position.x}, ${position.y}) scale(${scale}) rotate(${rotation}, ${viewBox.x + viewBox.width / 2}, ${viewBox.y + viewBox.height / 2})`} 
+            dangerouslySetInnerHTML={{ __html: innerElements }} 
+          />
         </svg>
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center text-industrial-muted gap-2 font-mono p-8">
@@ -440,28 +529,36 @@ export const FlatPreviewer: React.FC<FlatPreviewerProps> = ({
       )}
 
       {/* Grid Coordinates Overlay */}
-      <div className="absolute bottom-3 left-3 bg-industrial-card/90 backdrop-blur border border-industrial-border px-2 py-1 rounded text-[10px] font-mono text-industrial-muted">
-        Scale: {(scale * 100).toFixed(0)}%
-      </div>
+  <div className="absolute bottom-3 left-3 bg-industrial-card/90 backdrop-blur border border-industrial-border px-2 py-1 rounded text-[10px] font-mono text-industrial-muted">
+    Scale: {(scale * 100).toFixed(0)}%
+  </div>
 
-      {/* Geometry Validation Status & Color Legend */}
-      {!is3dView && svgContent && (
-        <div className="absolute bottom-3 right-3 bg-industrial-card/90 backdrop-blur border border-industrial-border p-1.5 px-2.5 rounded flex items-center gap-4 text-[10px] font-mono select-none">
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-0.5 bg-[#10B981] border-b border-dashed border-[#10B981] inline-block"></span>
-            <span className="text-[#10B981] font-bold">Up Bends</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-0.5 bg-[#EF4444] border-b border-dashed border-[#EF4444] inline-block"></span>
-            <span className="text-[#EF4444] font-bold">Down Bends</span>
-          </div>
-          <span className="text-industrial-border/60">|</span>
-          <div className="flex items-center gap-1.5 text-industrial-success">
-            <span className="w-1.5 h-1.5 bg-industrial-success rounded-full"></span>
-            <span>Loop Status: Closed (OK)</span>
-          </div>
-        </div>
-      )}
+  {/* Interactive DXF Layer Visibility Control Panel */}
+  {!is3dView && svgContent && (
+    <div className="absolute bottom-3 right-3 bg-industrial-card/95 backdrop-blur border border-industrial-border p-2 rounded-lg flex flex-wrap items-center gap-3 text-[10px] font-mono select-none shadow-xl">
+      <span className="text-industrial-muted font-bold uppercase text-[9px]">Layers:</span>
+      <label className="flex items-center gap-1 cursor-pointer text-gray-200 hover:text-white">
+        <input type="checkbox" checked={showCut} onChange={e => setShowCut(e.target.checked)} className="w-3 h-3 accent-green-500 rounded" />
+        <span className="text-green-400 font-semibold">Cut Outer</span>
+      </label>
+      <label className="flex items-center gap-1 cursor-pointer text-gray-200 hover:text-white">
+        <input type="checkbox" checked={showHoles} onChange={e => setShowHoles(e.target.checked)} className="w-3 h-3 accent-yellow-500 rounded" />
+        <span className="text-yellow-400 font-semibold">Holes</span>
+      </label>
+      <label className="flex items-center gap-1 cursor-pointer text-gray-200 hover:text-white">
+        <input type="checkbox" checked={showUpBends} onChange={e => setShowUpBends(e.target.checked)} className="w-3 h-3 accent-emerald-500 rounded" />
+        <span className="text-emerald-400 font-semibold">Up Bends</span>
+      </label>
+      <label className="flex items-center gap-1 cursor-pointer text-gray-200 hover:text-white">
+        <input type="checkbox" checked={showDownBends} onChange={e => setShowDownBends(e.target.checked)} className="w-3 h-3 accent-red-500 rounded" />
+        <span className="text-red-400 font-semibold">Down Bends</span>
+      </label>
+      <label className="flex items-center gap-1 cursor-pointer text-gray-200 hover:text-white">
+        <input type="checkbox" checked={showForming} onChange={e => setShowForming(e.target.checked)} className="w-3 h-3 accent-magenta-500 rounded" />
+        <span className="text-purple-400 font-semibold">Forming/Dimples</span>
+      </label>
     </div>
+  )}
+</div>
   );
 };

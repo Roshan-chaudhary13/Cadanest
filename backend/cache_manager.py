@@ -74,31 +74,33 @@ def store_cached_file(cache_key: str, source_path: str, extension: str) -> str:
 
 def cleanup_memory(*objects):
     """
-    Explicitly frees Open CASCADE shape references, triggers Python GC,
-    and prevents memory leaks during large batch operations.
+    Triggers Python GC to free local Open CASCADE shape references
+    (flat_shape, bend_lines) after each unfold.
+    IMPORTANT: Does NOT clear _STEP_SHAPE_CACHE — the in-memory STEP
+    shape cache must survive across batch calls so that IsSame/IsPartner
+    face pointer matching works on the same TopoDS_Shape object.
     """
     for obj in objects:
         if obj is not None:
-            try:
-                if hasattr(obj, "Nullify"):
-                    obj.Nullify()
-            except Exception:
-                pass
             del obj
 
     gc.collect()
 
 def clear_cache_folder():
     """
-    Clears all cached files in the .cadanest_cache directory.
+    Completely and properly deletes all cached session files in the .cadanest_cache directory.
+    Enforces strict zero-persistence between sessions.
     """
     ensure_cache_dir()
-    for filename in os.listdir(CACHE_DIR):
-        file_path = os.path.join(CACHE_DIR, filename)
-        try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
-        except Exception as e:
-            sys.stderr.write(f"Failed to delete {file_path}. Reason: {e}\n")
+    try:
+        for filename in os.listdir(CACHE_DIR):
+            file_path = os.path.join(CACHE_DIR, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                sys.stderr.write(f"Failed to delete {file_path}. Reason: {e}\n")
+    except Exception as ex:
+        sys.stderr.write(f"Cache folder wipe error: {ex}\n")

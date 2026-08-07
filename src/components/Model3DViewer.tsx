@@ -10,16 +10,43 @@ import { RotateCw, Move, Maximize2 } from 'lucide-react';
 
 const stlBufferCache = new Map<string, ArrayBuffer>();
 
+export function getMaterialColorHex(materialName?: string): number {
+  if (!materialName) return 0x38BDF8;
+  const mat = materialName.toLowerCase();
+  if (mat.includes('copper') || mat.includes('cu')) return 0xE57E25; // Warm Copper
+  if (mat.includes('alum') || mat.includes('al6') || mat.includes('al5') || mat.includes('1060')) return 0x38BDF8; // Metallic Cyan
+  if (mat.includes('stainless') || mat.includes('ss3')) return 0xA855F7; // Chrome Violet
+  if (mat.includes('brass')) return 0xEAB308; // Golden Brass
+  if (mat.includes('galvanized') || mat.includes('gi')) return 0x64748B; // Silver Gray
+  if (mat.includes('structural') || mat.includes('steel')) return 0x3B82F6; // Steel Blue
+  return 0x38BDF8;
+}
+
+export function getMaterialColorCss(materialName?: string): string {
+  if (!materialName) return '#38BDF8';
+  const mat = materialName.toLowerCase();
+  if (mat.includes('copper') || mat.includes('cu')) return '#E57E25';
+  if (mat.includes('alum') || mat.includes('al6') || mat.includes('al5') || mat.includes('1060')) return '#38BDF8';
+  if (mat.includes('stainless') || mat.includes('ss3')) return '#A855F7';
+  if (mat.includes('brass')) return '#EAB308';
+  if (mat.includes('galvanized') || mat.includes('gi')) return '#64748B';
+  if (mat.includes('structural') || mat.includes('steel')) return '#3B82F6';
+  return '#38BDF8';
+}
+
 interface Part3DInfo {
   id: string;
   name: string;
   stlPath: string;
+  material?: string;
 }
 
 interface FaceMeta {
   name: string;
   type: string;
   area: number;
+  normal?: number[];
+  is_sheet_metal?: boolean;
 }
 
 interface Model3DViewerProps {
@@ -31,6 +58,12 @@ interface Model3DViewerProps {
   hoveredFaceName?: string | null;
   onFaceClick?: (faceName: string) => void;
   onFaceHover?: (faceName: string | null) => void;
+  onSetBaseFace?: (faceName: string) => void;
+  onAddBaseFace?: (faceName: string) => void;
+  onRemoveBaseFace?: (faceName: string) => void;
+  onClearBaseFace?: () => void;
+  onSelectPart?: (partId: string) => void;
+  selectedPartId?: string | null;
   themeMode?: 'light' | 'dark';
 }
 
@@ -42,6 +75,12 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
   hoveredFaceName = null,
   onFaceClick,
   onFaceHover,
+  onSetBaseFace,
+  onAddBaseFace,
+  onRemoveBaseFace,
+  onClearBaseFace,
+  onSelectPart,
+  selectedPartId,
   themeMode = 'dark',
   onToggleFullScreen
 }) => {
@@ -83,10 +122,16 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
     camera.position.set(200, 200, 300);
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true, 
+      alpha: true, 
+      powerPreference: 'high-performance', 
+      precision: 'highp', 
+      stencil: false 
+    });
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = true;
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     
     // Clear old canvases
     mountRef.current.innerHTML = '';
@@ -139,54 +184,104 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
     let lastHoveredFaceName: string | null = null;
+    let hoverRafId: number | null = null;
+
+    const getFaceNameFromIntersection = (intersect: THREE.Intersection): string | null => {
+      if (!intersect) return null;
+      const obj = intersect.object as THREE.Mesh;
+      if (obj.userData && obj.userData.faceName) {
+        return obj.userData.faceName;
+      }
+      if (intersect.face && faces && faces.length > 0) {
+        const worldNormal = intersect.face.normal.clone();
+        const normalMatrix = new THREE.Matrix3().getNormalMatrix(obj.matrixWorld);
+        worldNormal.applyMatrix3(normalMatrix).normalize();
+
+        let bestMatch: string | null = null;
+        let maxDot = -1;
+
+        for (const f of faces) {
+          const isPlanar = f.type?.toUpperCase() === 'PLANE' || f.type === 'Plane';
+          if (!isPlanar || !(f as any).normal) continue;
+          const fn = (f as any).normal;
+          const fVec = new THREE.Vector3(fn[0], fn[1], fn[2]);
+          const dot = Math.abs(worldNormal.dot(fVec));
+          if (dot > 0.95 && dot > maxDot) {
+            maxDot = dot;
+            bestMatch = f.name;
+          }
+        }
+        if (bestMatch) return bestMatch;
+      }
+      return null;
+    };
 
     const onMouseMove = (event: MouseEvent) => {
       if (!rendererRef.current || !cameraRef.current || combinedView) return;
+      if (hoverRafId !== null) return;
 
-      const rect = rendererRef.current.domElement.getBoundingClientRect();
-      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      const clientX = event.clientX;
+      const clientY = event.clientY;
 
-      raycaster.setFromCamera(mouse, cameraRef.current);
-      const intersects = raycaster.intersectObjects(faceMeshesRef.current);
+      hoverRafId = requestAnimationFrame(() => {
+        hoverRafId = null;
+        if (!rendererRef.current || !cameraRef.current) return;
 
-      if (intersects.length > 0) {
-        const intersectedMesh = intersects[0].object as THREE.Mesh;
-        const faceName = intersectedMesh.userData.faceName;
-        
-        if (faceName !== lastHoveredFaceName) {
-          lastHoveredFaceName = faceName;
-          if (onFaceHover) {
-            onFaceHover(faceName);
+        const rect = rendererRef.current.domElement.getBoundingClientRect();
+        mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, cameraRef.current);
+        const candidates = [...faceMeshesRef.current, ...meshesRef.current];
+        const intersects = raycaster.intersectObjects(candidates, true);
+
+        if (intersects.length > 0) {
+          const faceName = getFaceNameFromIntersection(intersects[0]);
+          if (faceName && faceName !== lastHoveredFaceName) {
+            lastHoveredFaceName = faceName;
+            if (onFaceHover) {
+              onFaceHover(faceName);
+            }
           }
-        }
-        rendererRef.current.domElement.style.cursor = 'pointer';
-      } else {
-        if (lastHoveredFaceName !== null) {
-          lastHoveredFaceName = null;
-          if (onFaceHover) {
-            onFaceHover(null);
+          rendererRef.current.domElement.style.cursor = faceName ? 'pointer' : 'default';
+        } else {
+          if (lastHoveredFaceName !== null) {
+            lastHoveredFaceName = null;
+            if (onFaceHover) {
+              onFaceHover(null);
+            }
           }
+          rendererRef.current.domElement.style.cursor = 'default';
         }
-        rendererRef.current.domElement.style.cursor = 'default';
-      }
+      });
     };
 
     const onCanvasClick = (event: MouseEvent) => {
-      if (!rendererRef.current || !cameraRef.current || combinedView) return;
+      if (!rendererRef.current || !cameraRef.current) return;
 
       const rect = rendererRef.current.domElement.getBoundingClientRect();
       mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
       raycaster.setFromCamera(mouse, cameraRef.current);
-      const intersects = raycaster.intersectObjects(faceMeshesRef.current);
 
-      if (intersects.length > 0) {
-        const clickedMesh = intersects[0].object as THREE.Mesh;
-        const faceName = clickedMesh.userData.faceName;
-        if (onFaceClick) {
-          onFaceClick(faceName);
+      if (combinedView) {
+        const intersects = raycaster.intersectObjects(meshesRef.current, true);
+        if (intersects.length > 0) {
+          const clickedMesh = intersects[0].object as THREE.Mesh;
+          const partId = clickedMesh.userData.partId;
+          if (partId && onSelectPart) {
+            onSelectPart(partId);
+          }
+        }
+      } else {
+        const candidates = [...faceMeshesRef.current, ...meshesRef.current];
+        const intersects = raycaster.intersectObjects(candidates, true);
+        if (intersects.length > 0) {
+          const faceName = getFaceNameFromIntersection(intersects[0]);
+          if (faceName && onFaceClick) {
+            onFaceClick(faceName);
+          }
         }
       }
     };
@@ -220,7 +315,6 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
     const loadAllParts = async () => {
       try {
         const loadedMeshes: THREE.Mesh[] = [];
-        const spacing = 40; // spacer between parts in combined view
 
         // Fetch ArrayBuffers for all paths (with memory cache check)
         const fetchPromises = parts.map(async (part) => {
@@ -237,38 +331,58 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
 
         const results = await Promise.all(fetchPromises);
 
-        // Compute layout offsets
-        let currentXOffset = 0;
+        // Pre-compute 2D ground grid cell dimensions for combined scene layout
+        const N = results.length;
+        const cols = Math.ceil(Math.sqrt(N));
+        let maxCellX = 80;
+        let maxCellZ = 80;
 
-        for (const { part, arrayBuffer } of results) {
+        const parsedItems = results.map(({ part, arrayBuffer }) => {
           const geometry = loader.parse(arrayBuffer);
           geometry.computeVertexNormals();
 
-          // 1. Center geometry to its local origin FIRST before creating wireframe or mesh
+          // 1. Center geometry to its local origin FIRST
           geometry.computeBoundingBox();
           const center = new THREE.Vector3();
           if (geometry.boundingBox) {
             geometry.boundingBox.getCenter(center);
             geometry.translate(-center.x, -center.y, -center.z);
+            geometry.computeBoundingBox();
+            const sz = new THREE.Vector3();
+            geometry.boundingBox.getSize(sz);
+            if (sz.x > maxCellX) maxCellX = sz.x;
+            if (sz.z > maxCellZ) maxCellZ = sz.z;
           }
+          geometry.userData = { center };
+          return { part, geometry };
+        });
 
-          // Steel material — vibrant blue, adjusted for theme contrast
+        const spacingX = maxCellX + 50; // 50mm padding between grid cells
+        const spacingZ = maxCellZ + 50;
+        const totalRows = Math.ceil(N / cols);
+
+        for (let idx = 0; idx < parsedItems.length; idx++) {
+          const { part, geometry } = parsedItems[idx];
+
+          // Dynamic Material alloy color
+          const matColorHex = getMaterialColorHex(part.material);
           const material = new THREE.MeshStandardMaterial({
-            color: isDark ? 0x33A3FF : 0x0073CC,        // Neon blue vs Deep industrial blue
-            metalness: isDark ? 0.8 : 0.7,
+            color: matColorHex,
+            metalness: isDark ? 0.75 : 0.65,
             roughness: 0.3,
             side: THREE.DoubleSide
           });
 
-          // 2. Create wireframe based on centered geometry (aligned perfectly)
+          // 2. Create wireframe based on centered geometry
           const wireframeGeom = new THREE.EdgesGeometry(geometry);
           const wireframeMat = new THREE.LineBasicMaterial({ 
-            color: isDark ? 0x262B44 : 0x8A9CC0,        // Slate-blue vs Medium blue-grey
+            color: isDark ? 0x262B44 : 0x8A9CC0,
             linewidth: 1 
           });
           const wireframe = new THREE.LineSegments(wireframeGeom, wireframeMat);
 
           const mesh = new THREE.Mesh(geometry, material);
+          mesh.userData = { partId: part.id };
           mesh.add(wireframe);
           mesh.castShadow = true;
           mesh.receiveShadow = true;
@@ -278,7 +392,8 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
             const activeFaceNames = activeFace ? activeFace.split(',').filter(Boolean) : [];
             
             for (const f of faces) {
-              if (f.type !== 'Plane') continue;
+              const isPlanar = f.type?.toUpperCase() === 'PLANE' || f.type === 'Plane';
+              if (!isPlanar) continue;
               
               const faceName = f.name;
               const faceIdx = faceName.replace('Face', '');
@@ -300,25 +415,26 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
                   faceGeometry.computeVertexNormals();
 
                   // Apply the exact same centering translation
-                  if (center.lengthSq() > 0) {
-                    faceGeometry.translate(-center.x, -center.y, -center.z);
-                  }
+                  const geomCenter = geometry.userData?.center || new THREE.Vector3();
+                  faceGeometry.translate(-geomCenter.x, -geomCenter.y, -geomCenter.z);
+                  faceGeometry.computeBoundingBox();
 
+                  const isSheetMetal = (f as any).is_sheet_metal !== false;
                   const isActive = activeFaceNames.includes(faceName);
                   const isHovered = hoveredFaceName === faceName;
 
-                  let color = isDark ? 0x33A3FF : 0x0073CC; // Base metal sheet color
-                  let metalness = 0.7;
-                  let roughness = 0.3;
+                  let color = isSheetMetal ? (isDark ? 0x38BDF8 : 0x0284C7) : (isDark ? 0x475569 : 0x334155);
+                  let metalness = isSheetMetal ? 0.75 : 0.3;
+                  let roughness = isSheetMetal ? 0.25 : 0.7;
                   let polygonOffsetFactor = -1;
 
                   if (isActive) {
-                    color = isDark ? 0xF97316 : 0xE84D00; // Orange accent
+                    color = isDark ? 0xF97316 : 0xE84D00;
                     metalness = 0.9;
                     roughness = 0.1;
                     polygonOffsetFactor = -4;
                   } else if (isHovered) {
-                    color = isDark ? 0x33A3FF : 0x0073CC; // Blue accent
+                    color = isSheetMetal ? (isDark ? 0x38BDF8 : 0x0284C7) : (isDark ? 0x64748B : 0x475569);
                     metalness = 0.8;
                     roughness = 0.2;
                     polygonOffsetFactor = -3;
@@ -336,6 +452,8 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
 
                   const faceMesh = new THREE.Mesh(faceGeometry, faceMaterial);
                   faceMesh.name = faceName;
+                  // Only render active or hovered face overlays to prevent duplicate solid bodies
+                  faceMesh.visible = isActive || isHovered;
                   faceMesh.userData = { 
                     faceName, 
                     isActive,
@@ -353,11 +471,17 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
             }
           }
 
-          // 3. Positioning in the 3D world (Shift group center)
+          // 3. Positioning in 2D Ground Grid (Non-overlapping layout)
           if (combinedView) {
-            mesh.position.set(currentXOffset, 0, 0);
-            const sizeX = geometry.boundingBox ? (geometry.boundingBox.max.x - geometry.boundingBox.min.x) : 80;
-            currentXOffset += sizeX + spacing;
+            const col = idx % cols;
+            const row = Math.floor(idx / cols);
+            const posX = (col - (cols - 1) / 2) * spacingX;
+            const posZ = (row - (totalRows - 1) / 2) * spacingZ;
+            mesh.position.set(posX, 0, posZ);
+
+            if (selectedPartId && part.id === selectedPartId) {
+              (material as THREE.MeshStandardMaterial).color.setHex(isDark ? 0xF97316 : 0xE84D00);
+            }
           } else {
             mesh.position.set(0, 0, 0);
           }
@@ -386,35 +510,34 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
           overallBox.getCenter(center);
 
           // Center the controls target
-          if (combinedView) {
-            controls.target.set(center.x, center.y, center.z);
-          } else {
-            controls.target.set(0, 0, 0);
-          }
+          controls.target.set(center.x, center.y, center.z);
 
           // Dynamic grid helper scaling and positioning
-          scene.remove(gridHelper); // Remove initial static grid helper
-          const gridWidth = Math.max(1000, size.x * 2.5, size.z * 2.5);
+          scene.remove(gridHelper);
+          const gridWidth = Math.max(1000, size.x * 2.2, size.z * 2.2);
           const newGridHelper = isDark 
             ? new THREE.GridHelper(gridWidth, 50, 0x262B44, 0x181B2B)
             : new THREE.GridHelper(gridWidth, 50, 0xC2C8DC, 0xD8DCE8);
           
           newGridHelper.position.set(
-            combinedView ? center.x : 0,
-            overallBox.min.y - 20, // Float exactly 20mm below the lowest point of any model
-            combinedView ? center.z : 0
+            center.x,
+            overallBox.min.y - 10,
+            center.z
           );
           scene.add(newGridHelper);
           gridHelperRef.current = newGridHelper;
 
-          // Adjust camera distance to fit all models in viewport
-          const maxDim = Math.max(size.x, size.y, size.z) || 100;
+          // Adjust camera distance to fit all models in viewport cleanly
+          const maxDim = Math.max(size.x, size.z, 200);
           const fov = camera.fov * (Math.PI / 180);
-          let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-          cameraZ *= 1.5; // Zoom out slightly for breathing room
-          camera.position.set(cameraZ * 0.8, cameraZ * 0.8, cameraZ * 1.2);
+          let cameraDist = Math.abs((maxDim * 0.8) / Math.tan(fov / 2));
+          if (combinedView) {
+            cameraDist = Math.max(cameraDist, maxDim * 1.1);
+          }
+          camera.position.set(center.x + cameraDist * 0.75, center.y + cameraDist * 0.85 + size.y * 0.5, center.z + cameraDist * 0.95);
           camera.lookAt(controls.target);
           controls.update();
+          renderer.render(scene, camera);
 
           // 5. Initialize DragControls if dragging is enabled (Combined View only)
           if (combinedView && enableDrag) {
@@ -729,6 +852,100 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({
           Flat
         </button>
       </div>
+
+      {/* Interactive 3D Face Selection Control Bar Overlay */}
+      {!combinedView && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-industrial-card/95 backdrop-blur border border-industrial-border px-3 py-1.5 rounded-lg shadow-xl pointer-events-auto select-none font-mono text-xs">
+          <div className="flex items-center gap-1.5 border-r border-industrial-border pr-2.5">
+            <span className="text-[10px] text-industrial-muted uppercase tracking-wider font-bold">Base Face:</span>
+            <span className={`px-2 py-0.5 rounded font-bold text-xs ${activeFace ? 'bg-industrial-orange/20 text-industrial-orange border border-industrial-orange/40' : 'bg-industrial-darker text-industrial-muted'}`}>
+              {activeFace || 'Auto (Default)'}
+            </span>
+          </div>
+
+          {hoveredFaceName && (
+            <div className="flex items-center gap-1.5 text-[11px] text-industrial-accent font-bold pr-2 border-r border-industrial-border">
+              <span>Hover:</span>
+              <span className="underline">{hoveredFaceName}</span>
+              {faces.find(f => f.name === hoveredFaceName)?.is_sheet_metal === false && (
+                <span className="px-1.5 py-0.5 text-[9px] bg-slate-800 text-amber-300 border border-amber-700/60 rounded font-semibold">
+                  Assembly Insert / Non-Sheet Metal
+                </span>
+              )}
+            </div>
+          )}
+
+          {hoveredFaceName && onSetBaseFace && (
+            <button
+              onClick={() => {
+                const fMeta = faces.find(f => f.name === hoveredFaceName);
+                if (fMeta && (fMeta as any).is_sheet_metal === false) {
+                  return;
+                }
+                onSetBaseFace(hoveredFaceName);
+              }}
+              disabled={faces.find(f => f.name === hoveredFaceName)?.is_sheet_metal === false}
+              className={`px-2.5 py-1 rounded font-bold text-[11px] shadow transition cursor-pointer flex items-center gap-1 ${
+                faces.find(f => f.name === hoveredFaceName)?.is_sheet_metal === false
+                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50'
+                  : 'bg-industrial-accent hover:bg-industrial-accent/80 text-industrial-bg'
+              }`}
+              title={
+                faces.find(f => f.name === hoveredFaceName)?.is_sheet_metal === false
+                  ? 'Cannot select base face on non-sheet metal assembly insert'
+                  : 'Set this face as the sole primary base face for flattening'
+              }
+            >
+              Set Base Face
+            </button>
+          )}
+
+          {hoveredFaceName && onAddBaseFace && (
+            <button
+              onClick={() => {
+                const fMeta = faces.find(f => f.name === hoveredFaceName);
+                if (fMeta && (fMeta as any).is_sheet_metal === false) {
+                  return;
+                }
+                onAddBaseFace(hoveredFaceName);
+              }}
+              disabled={faces.find(f => f.name === hoveredFaceName)?.is_sheet_metal === false}
+              className={`px-2.5 py-1 rounded font-bold text-[11px] transition cursor-pointer flex items-center gap-1 ${
+                faces.find(f => f.name === hoveredFaceName)?.is_sheet_metal === false
+                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50 border border-slate-700'
+                  : 'bg-industrial-darker hover:bg-industrial-border border border-industrial-border text-industrial-text'
+              }`}
+              title={
+                faces.find(f => f.name === hoveredFaceName)?.is_sheet_metal === false
+                  ? 'Cannot select base face on non-sheet metal assembly insert'
+                  : 'Add this face to multi-root base face selection'
+              }
+            >
+              + Add Base Face
+            </button>
+          )}
+
+          {hoveredFaceName && onRemoveBaseFace && activeFace?.split(',').includes(hoveredFaceName) && (
+            <button
+              onClick={() => onRemoveBaseFace(hoveredFaceName)}
+              className="px-2.5 py-1 bg-red-950/80 hover:bg-red-900 border border-red-800/80 text-red-200 rounded font-bold text-[11px] transition cursor-pointer flex items-center gap-1"
+              title="Remove this face from base face selection"
+            >
+              - Remove Face
+            </button>
+          )}
+
+          {activeFace && onClearBaseFace && (
+            <button
+              onClick={onClearBaseFace}
+              className="px-2 py-1 bg-red-950/60 hover:bg-red-900/80 border border-red-800/60 text-red-300 rounded font-bold text-[10px] transition cursor-pointer"
+              title="Remove/Clear assigned base face to reset to Auto"
+            >
+              Clear All
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 3D View Axis Snapper (Cube Overlay) */}
       <div className="absolute top-3 right-3 z-10 flex items-start gap-2 pointer-events-auto select-none">
